@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="stats">
+    <div class="stat-box">
+        <div class="label">Trades Reconciled</div>
+        <div class="value">{{ matched_count }} of {{ total_count }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Trade Transactions</h2>
+    <p style="color:#666; margin-bottom:16px;">
+        Click a trade to reconcile it against your opening position lots using LIFO matching.
+    </p>
+
+    {% if trades %}
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Wallet</th>
+                    <th>Sold</th>
+                    <th>Received</th>
+                    <th>Proceeds</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in trades %}
+                <tr style="cursor:pointer;" onclick="window.location='{{ url_for('reconcile_detail', wallet_id=t.wallet_id, tx_index=t.tx_index) }}'">
+                    <td>{{ t.date }}</td>
+                    <td>{{ t.wallet_label }}</td>
+                    <td><span style="color:#dc2626;">{{ t.sold_amount }} {{ t.sold_token }}</span></td>
+                    <td><span style="color:#16a34a;">{{ t.recv_amount }} {{ t.recv_token }}</span></td>
+                    <td>{{ t.proceeds }}</td>
+                    <td>
+                        {% if t.status == 'Matched' %}
+                            <span class="badge badge-success">Matched</span>
+                        {% else %}
+                            <span class="badge">Unmatched</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:#888;">No trade transactions found. Upload wallet CSVs on the Wallets page first.</p>
+    {% endif %}
+</div>
+{% endblock %}

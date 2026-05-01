@@ -254,6 +254,10 @@
             rowsArr.sort(function(a, b) {
                 let aVal = a.children[colIndex].textContent.trim();
                 let bVal = b.children[colIndex].textContent.trim();
+                // Date column: always sort as strings (ISO format sorts correctly)
+                if (col === 'date') {
+                    return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+                }
                 // For USD column, strip $ and commas for numeric sort
                 let aNum = parseFloat(aVal.replace(/[$,]/g, ''));
                 let bNum = parseFloat(bVal.replace(/[$,]/g, ''));

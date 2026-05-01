@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Form 8949 - Sales and Other Dispositions of Capital Assets</title>
+    <style>
+        @media print {
+            body { margin: 0; padding: 0; }
+            .no-print { display: none !important; }
+            @page { margin: 0.5in; }
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: "Courier New", Courier, monospace;
+            font-size: 11px;
+            color: #000;
+            background: #fff;
+            padding: 20px;
+            line-height: 1.4;
+        }
+        .page {
+            max-width: 800px;
+            margin: 0 auto 40px auto;
+            page-break-after: always;
+        }
+        .page:last-child {
+            page-break-after: auto;
+        }
+        .form-header {
+            text-align: center;
+            margin-bottom: 16px;
+            border-bottom: 2px solid #000;
+            padding-bottom: 8px;
+        }
+        .form-header h1 {
+            font-size: 18px;
+            margin-bottom: 2px;
+        }
+        .form-header h2 {
+            font-size: 13px;
+            font-weight: normal;
+        }
+        .form-header .dept {
+            font-size: 9px;
+            color: #444;
+        }
+        .section-title {
+            font-size: 13px;
+            font-weight: bold;
+            margin: 16px 0 8px 0;
+            padding: 4px 0;
+            border-bottom: 1px solid #000;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 10px;
+            margin-bottom: 8px;
+        }
+        th, td {
+            border: 1px solid #999;
+            padding: 3px 5px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background: #f0f0f0;
+            font-weight: bold;
+            font-size: 9px;
+            text-align: center;
+        }
+        td.num {
+            text-align: right;
+            font-family: "Courier New", Courier, monospace;
+        }
+        .col-a { width: 28%; }
+        .col-b { width: 12%; }
+        .col-c { width: 12%; }
+        .col-d { width: 14%; }
+        .col-e { width: 14%; }
+        .col-h { width: 14%; }
+        .totals-row td {
+            font-weight: bold;
+            border-top: 2px solid #000;
+        }
+        .print-btn {
+            display: inline-block;
+            padding: 10px 24px;
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin-bottom: 20px;
+        }
+        .print-btn:hover { background: #1d4ed8; }
+        .toolbar-print {
+            max-width: 800px;
+            margin: 0 auto 10px auto;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .empty-note {
+            padding: 12px;
+            color: #666;
+            font-style: italic;
+            text-align: center;
+            font-family: -apple-system, sans-serif;
+        }
+    </style>
+</head>
+<body>
+
+<div class="toolbar-print no-print">
+    <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+    <a href="/reports" style="margin-left:12px; font-size:14px;">Back to Reports</a>
+</div>
+
+<!-- Part I: Short-Term -->
+<div class="page">
+    <div class="form-header">
+        <div class="dept">Department of the Treasury - Internal Revenue Service</div>
+        <h1>Form 8949</h1>
+        <h2>Sales and Other Dispositions of Capital Assets</h2>
+        <div class="dept">Tax Year {{ tax_year }}</div>
+    </div>
+
+    <div class="section-title">Part I - Short-Term Capital Gains and Losses (assets held one year or less)</div>
+
+    {% if short_term %}
+    <table>
+        <thead>
+            <tr>
+                <th class="col-a">(a) Description of property</th>
+                <th class="col-b">(b) Date acquired</th>
+                <th class="col-c">(c) Date sold</th>
+                <th class="col-d">(d) Proceeds</th>
+                <th class="col-e">(e) Cost or other basis</th>
+                <th class="col-h">(h) Gain or (loss)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in short_term %}
+            <tr>
+                <td>{{ r.description }}</td>
+                <td>{{ r.date_acquired }}</td>
+                <td>{{ r.date_sold }}</td>
+                <td class="num">{{ "{:,.2f}".format(r.proceeds) }}</td>
+                <td class="num">{{ "{:,.2f}".format(r.cost_basis) }}</td>
+                <td class="num">{{ "{:,.2f}".format(r.gain_loss) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+        <tfoot>
+            <tr class="totals-row">
+                <td colspan="3"><strong>Totals</strong></td>
+                <td class="num">{{ "{:,.2f}".format(short_term | map(attribute='proceeds') | sum) }}</td>
+                <td class="num">{{ "{:,.2f}".format(short_term | map(attribute='cost_basis') | sum) }}</td>
+                <td class="num">{{ "{:,.2f}".format(short_term | map(attribute='gain_loss') | sum) }}</td>
+            </tr>
+        </tfoot>
+    </table>
+    {% else %}
+    <p class="empty-note">No short-term transactions.</p>
+    {% endif %}
+</div>
+
+<!-- Part II: Long-Term -->
+<div class="page">
+    <div class="form-header">
+        <div class="dept">Department of the Treasury - Internal Revenue Service</div>
+        <h1>Form 8949</h1>
+        <h2>Sales and Other Dispositions of Capital Assets</h2>
+        <div class="dept">Tax Year {{ tax_year }}</div>
+    </div>
+
+    <div class="section-title">Part II - Long-Term Capital Gains and Losses (assets held more than one year)</div>
+
+    {% if long_term %}
+    <table>
+        <thead>
+            <tr>
+                <th class="col-a">(a) Description of property</th>
+                <th class="col-b">(b) Date acquired</th>
+                <th class="col-c">(c) Date sold</th>
+                <th class="col-d">(d) Proceeds</th>
+                <th class="col-e">(e) Cost or other basis</th>
+                <th class="col-h">(h) Gain or (loss)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in long_term %}
+            <tr>
+                <td>{{ r.description }}</td>
+                <td>{{ r.date_acquired }}</td>
+                <td>{{ r.date_sold }}</td>
+                <td class="num">{{ "{:,.2f}".format(r.proceeds) }}</td>
+                <td class="num">{{ "{:,.2f}".format(r.cost_basis) }}</td>
+                <td class="num">{{ "{:,.2f}".format(r.gain_loss) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+        <tfoot>
+            <tr class="totals-row">
+                <td colspan="3"><strong>Totals</strong></td>
+                <td class="num">{{ "{:,.2f}".format(long_term | map(attribute='proceeds') | sum) }}</td>
+                <td class="num">{{ "{:,.2f}".format(long_term | map(attribute='cost_basis') | sum) }}</td>
+                <td class="num">{{ "{:,.2f}".format(long_term | map(attribute='gain_loss') | sum) }}</td>
+            </tr>
+        </tfoot>
+    </table>
+    {% else %}
+    <p class="empty-note">No long-term transactions.</p>
+    {% endif %}
+</div>
+
+</body>
+</html>

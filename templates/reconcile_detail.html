@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .lot-matched { background: #f0fdf4; }
+    .lot-matched td { border-bottom-color: #bbf7d0; }
+    .gain { color: #16a34a; font-weight: 600; }
+    .loss { color: #dc2626; font-weight: 600; }
+    .term-long { color: #2563eb; }
+    .term-short { color: #9333ea; }
+    .term-mixed { color: #d97706; }
+    .account-input {
+        padding: 4px 8px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 0.85em;
+        width: 200px;
+        font-family: monospace;
+    }
+    .account-input:focus {
+        border-color: #2563eb;
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(37,99,235,0.2);
+    }
+    .account-form { display: inline; }
+    .save-btn {
+        padding: 2px 8px;
+        font-size: 0.8em;
+        background: #2563eb;
+        color: #fff;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        margin-left: 4px;
+    }
+    .save-btn:hover { background: #1d4ed8; }
+    .warning-box {
+        background: #fef3c7;
+        border: 1px solid #fbbf24;
+        border-radius: 6px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        color: #92400e;
+    }
+    .recon-confirmed {
+        background: #f0fdf4;
+        border: 1px solid #86efac;
+        border-radius: 6px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        color: #166534;
+    }
+    .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+    .summary-item {
+        background: #f9fafb;
+        border-radius: 6px;
+        padding: 12px 16px;
+    }
+    .summary-item .label {
+        font-size: 0.8em;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .summary-item .value {
+        font-size: 1.2em;
+        font-weight: 600;
+        margin-top: 2px;
+    }
+</style>
+
+<div class="card">
+    <div class="toolbar">
+        <div>
+            <h2>Reconcile Trade</h2>
+            <p style="color:#666; margin-top:4px;">
+                {{ wallet.label }} <span style="font-family:monospace; font-size:0.85em;">{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}</span>
+            </p>
+        </div>
+        <a href="{{ url_for('reconcile') }}" class="btn btn-sm btn-secondary">Back to Reconcile</a>
+    </div>
+
+    {% if existing_recon %}
+    <div class="recon-confirmed">
+        <strong>This trade has been reconciled.</strong>
+        Gain/Loss: {{ gain_loss_fmt }} ({{ existing_recon.term }}-term)
+        <form action="{{ url_for('reconcile_unconfirm') }}" method="post" style="display:inline; margin-left:12px;">
+            <input type="hidden" name="wallet_id" value="{{ wallet.id }}">
+            <input type="hidden" name="tx_index" value="{{ tx_index }}">
+            <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Remove this reconciliation?')">Undo</button>
+        </form>
+    </div>
+    {% endif %}
+
+    <div class="summary-grid">
+        <div class="summary-item">
+            <div class="label">Date</div>
+            <div class="value">{{ trade_date }}</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">Sold</div>
+            <div class="value" style="color:#dc2626;">{{ sold_amount_fmt }} {{ sold_token }}</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">Received</div>
+            <div class="value" style="color:#16a34a;">{{ recv_amount_fmt }} {{ recv_token }}</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">Proceeds (USD)</div>
+            <div class="value">{{ proceeds_fmt }}</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">Cost Basis (LIFO)</div>
+            <div class="value">{{ cost_basis_fmt }}</div>
+        </div>
+        <div class="summary-item">
+            <div class="label">Gain / Loss</div>
+            <div class="value {% if is_gain %}gain{% else %}loss{% endif %}">
+                {% if is_gain %}+{% else %}-{% endif %}{{ gain_loss_fmt }}
+            </div>
+        </div>
+        <div class="summary-item">
+            <div class="label">Term</div>
+            <div class="value term-{{ overall_term }}">
+                {% if overall_term == 'long' %}Long-term (>1yr)
+                {% elif overall_term == 'short' %}Short-term
+                {% elif overall_term == 'mixed' %}Mixed (long + short)
+                {% else %}Unknown
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    {% if warning %}
+    <div class="warning-box">
+        {{ warning }}
+    </div>
+    {% endif %}
+
+    {% if not matched_lots and not existing_recon %}
+    <div class="warning-box">
+        No matching lots found. The opening position Account field must match the wallet address
+        <strong>{{ wallet.address }}</strong>
+        <span class="copy-icon" onclick="navigator.clipboard.writeText('{{ wallet.address }}');this.textContent='✓';setTimeout(()=>this.textContent='📋',1000)" style="cursor:pointer;margin-left:4px;" title="Copy address">📋</span>
+        (case-insensitive). Update the Account values below.
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Opening Position Lots for {{ sold_token }}</h2>
+    <p style="color:#666; margin-bottom:12px;">
+        {{ token_lots|length }} lots found. LIFO-highlighted lots match wallet
+        <strong style="font-family:monospace;">{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}</strong>
+        <span class="copy-icon" onclick="navigator.clipboard.writeText('{{ wallet.address }}');this.textContent='✓';setTimeout(()=>this.textContent='📋',1000)" style="cursor:pointer;margin-left:4px;" title="Copy address">📋</span>.
+        Edit the Account field to map legacy names to the wallet address.
+    </p>
+
+    {% if token_lots %}
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>LIFO</th>
+                    <th>Date Acquired</th>
+                    <th>Account</th>
+                    <th>Volume</th>
+                    <th>Price</th>
+                    <th>Cost Basis</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for lot in token_lots %}
+                <tr class="{% if lot.lot_index in matched_opening_indices %}lot-matched{% endif %}">
+                    <td>
+                        {% if lot.lot_index in matched_opening_indices %}
+                            {% for m in matched_lots %}
+                                {% if m.lot_index == lot.lot_index %}
+                                    <span title="Using {{ '%.6f'|format(m.volume_used) }} of {{ '%.6f'|format(lot.volume) }}" style="color:#16a34a; font-weight:600;">
+                                        {% if m.volume_used < lot.volume %}
+                                            Partial ({{ '%.4f'|format(m.volume_used) }})
+                                        {% else %}
+                                            Full
+                                        {% endif %}
+                                    </span>
+                                {% endif %}
+                            {% endfor %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ lot.date }}</td>
+                    <td>
+                        <form action="{{ url_for('update_position_account') }}" method="post" class="account-form">
+                            <input type="hidden" name="lot_index" value="{{ lot.lot_index }}">
+                            <input type="hidden" name="redirect_url" value="{{ url_for('reconcile_detail', wallet_id=wallet.id, tx_index=tx_index) }}">
+                            <input type="text" name="new_account" value="{{ lot.account }}" class="account-input"
+                                   onchange="this.form.submit()">
+                        </form>
+                    </td>
+                    <td>{{ '%.6f'|format(lot.volume) }}</td>
+                    <td>${{ '%.2f'|format(lot.price) }}</td>
+                    <td>${{ '%.2f'|format(lot.total) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:#888;">No opening position lots found for {{ sold_token }}.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>{{ tax_year }} Acquired Lots for {{ sold_token }}</h2>
+    <p style="color:#666; margin-bottom:12px;">
+        {{ token_2025_lots|length }} lots from {{ tax_year }} transactions (Airdrops, Income, Trade acquisitions).
+        These are automatically matched to this wallet.
+    </p>
+
+    {% if token_2025_lots %}
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>LIFO</th>
+                    <th>Date Acquired</th>
+                    <th>Source</th>
+                    <th>Token</th>
+                    <th>Amount</th>
+                    <th>Price</th>
+                    <th>Cost Basis</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for lot in token_2025_lots %}
+                {% set lot_id = '2025_' ~ lot.tx_index ~ '_' ~ lot.item_index %}
+                <tr class="{% if lot_id in matched_2025_ids %}lot-matched{% endif %}">
+                    <td>
+                        {% if lot_id in matched_2025_ids %}
+                            {% for m in matched_lots %}
+                                {% if m.lot_index == lot_id %}
+                                    <span title="Using {{ '%.6f'|format(m.volume_used) }} of {{ '%.6f'|format(lot.volume) }}" style="color:#16a34a; font-weight:600;">
+                                        {% if m.volume_used < lot.volume %}
+                                            Partial ({{ '%.4f'|format(m.volume_used) }})
+                                        {% else %}
+                                            Full
+                                        {% endif %}
+                                    </span>
+                                {% endif %}
+                            {% endfor %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ lot.date }}</td>
+                    <td>
+                        {% if lot.source == '2025_airdrop' %}Airdrop
+                        {% elif lot.source == '2025_income' %}Income
+                        {% elif lot.source == '2025_trade' %}Trade
+                        {% else %}{{ lot.source }}
+                        {% endif %}
+                    </td>
+                    <td>{{ lot.symbol }}</td>
+                    <td>{{ '%.6f'|format(lot.volume) }}</td>
+                    <td>
+                        {% if lot.price == 0 %}
+                            <span title="Missing USD value - price lookup needed" style="color:#d97706;">$0.00 &#9888;</span>
+                        {% else %}
+                            ${{ '%.2f'|format(lot.price) }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if lot.total == 0 %}
+                            <span title="Missing USD value - price lookup needed" style="color:#d97706;">$0.00 &#9888;</span>
+                        {% else %}
+                            ${{ '%.2f'|format(lot.total) }}
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:#888;">No {{ tax_year }} acquired lots found for {{ sold_token }}.</p>
+    {% endif %}
+</div>
+
+{% if not existing_recon %}
+<div class="card" style="text-align:center;">
+    {% if matched_lots %}
+    <form action="{{ url_for('reconcile_confirm') }}" method="post">
+        <input type="hidden" name="wallet_id" value="{{ wallet.id }}">
+        <input type="hidden" name="tx_index" value="{{ tx_index }}">
+        <button type="submit" class="btn" {% if warning %}onclick="return confirm('There are unmatched lots. Confirm anyway?')"{% endif %}>
+            Confirm Match
+        </button>
+        <p style="color:#666; margin-top:8px; font-size:0.9em;">
+            This will record the LIFO match: {{ cost_basis_fmt }} cost basis,
+            {% if is_gain %}+{% else %}-{% endif %}{{ gain_loss_fmt }}
+            {% if overall_term == 'long' %}long-term{% elif overall_term == 'short' %}short-term{% else %}mixed-term{% endif %} gain/loss.
+        </p>
+    </form>
+    {% else %}
+    <p style="color:#888;">
+        Update the Account fields above to match the wallet address before confirming.
+    </p>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

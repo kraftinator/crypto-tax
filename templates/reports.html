@@ -1,10 +1,174 @@
 {% extends "base.html" %}
 
 {% block content %}
+<div class="stats">
+    <div class="stat-box">
+        <div class="label">Total Proceeds</div>
+        <div class="value">${{ "{:,.2f}".format(total_proceeds) }}</div>
+    </div>
+    <div class="stat-box">
+        <div class="label">Total Cost Basis</div>
+        <div class="value">${{ "{:,.2f}".format(total_cost_basis) }}</div>
+    </div>
+    <div class="stat-box">
+        <div class="label">Total Gain/Loss</div>
+        <div class="value" style="color: {{ '#16a34a' if total_gain_loss >= 0 else '#dc2626' }};">
+            {{ '+' if total_gain_loss >= 0 else '' }}${{ "{:,.2f}".format(total_gain_loss) }}
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="label">Short-Term Gain/Loss</div>
+        <div class="value" style="color: {{ '#16a34a' if short_term_gl >= 0 else '#dc2626' }};">
+            {{ '+' if short_term_gl >= 0 else '' }}${{ "{:,.2f}".format(short_term_gl) }}
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="label">Long-Term Gain/Loss</div>
+        <div class="value" style="color: {{ '#16a34a' if long_term_gl >= 0 else '#dc2626' }};">
+            {{ '+' if long_term_gl >= 0 else '' }}${{ "{:,.2f}".format(long_term_gl) }}
+        </div>
+    </div>
+    <div class="stat-box">
+        <div class="label">Total Crypto Income</div>
+        <div class="value">${{ "{:,.2f}".format(total_income) }}</div>
+    </div>
+</div>
+
+<!-- Form 8949 Section -->
 <div class="card">
-    <h2>Reports</h2>
-    <p style="color:#666; margin-top:12px;">
-        Reports will be available in Phase 3. This will include LIFO matching, capital gains calculation, and tax form generation.
-    </p>
+    <div class="toolbar">
+        <h2>Form 8949 - Capital Gains & Losses</h2>
+        <div style="display:flex; gap:8px;">
+            <a href="{{ url_for('form8949_csv') }}" class="btn btn-sm">Download CSV</a>
+            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('pdf-modal').style.display='flex'">Download PDF</button>
+        </div>
+    </div>
+
+    {% if form8949_rows %}
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>Description</th>
+                    <th>Date Acquired</th>
+                    <th>Date Sold</th>
+                    <th style="text-align:right;">Proceeds</th>
+                    <th style="text-align:right;">Cost Basis</th>
+                    <th style="text-align:right;">Gain or Loss</th>
+                    <th>Term</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in form8949_rows %}
+                <tr>
+                    <td>{{ r.description }}</td>
+                    <td>{{ r.date_acquired }}</td>
+                    <td>{{ r.date_sold }}</td>
+                    <td style="text-align:right;">${{ "{:,.2f}".format(r.proceeds) }}</td>
+                    <td style="text-align:right;">${{ "{:,.2f}".format(r.cost_basis) }}</td>
+                    <td style="text-align:right; color: {{ '#16a34a' if r.gain_loss >= 0 else '#dc2626' }};">
+                        {{ '+' if r.gain_loss >= 0 else '' }}${{ "{:,.2f}".format(r.gain_loss) }}
+                    </td>
+                    <td>
+                        {% if r.term == 'short' %}
+                            <span class="badge" style="background:#fde68a; color:#92400e;">Short</span>
+                        {% elif r.term == 'long' %}
+                            <span class="badge badge-success">Long</span>
+                        {% else %}
+                            <span class="badge">{{ r.term }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+            <tfoot>
+                <tr style="font-weight:600; border-top:2px solid #ccc;">
+                    <td colspan="3">Totals</td>
+                    <td style="text-align:right;">${{ "{:,.2f}".format(total_proceeds) }}</td>
+                    <td style="text-align:right;">${{ "{:,.2f}".format(total_cost_basis) }}</td>
+                    <td style="text-align:right; color: {{ '#16a34a' if total_gain_loss >= 0 else '#dc2626' }};">
+                        {{ '+' if total_gain_loss >= 0 else '' }}${{ "{:,.2f}".format(total_gain_loss) }}
+                    </td>
+                    <td></td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:#888;">No reconciled trades found. Reconcile trades on the Reconcile page first.</p>
+    {% endif %}
+</div>
+
+<!-- Crypto Income Section -->
+<div class="card">
+    <div class="toolbar">
+        <h2>Crypto Income</h2>
+        <div>
+            <a href="{{ url_for('income_csv') }}" class="btn btn-sm">Download CSV</a>
+        </div>
+    </div>
+
+    {% if income_rows %}
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Token</th>
+                    <th style="text-align:right;">Amount</th>
+                    <th style="text-align:right;">Fair Market Value (USD)</th>
+                    <th>Type</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in income_rows %}
+                <tr>
+                    <td>{{ r.date }}</td>
+                    <td>{{ r.token }}</td>
+                    <td style="text-align:right;">{{ r.amount }}</td>
+                    <td style="text-align:right;">${{ "{:,.2f}".format(r.fmv_usd) }}</td>
+                    <td>
+                        {% if r.type == 'Airdrop' %}
+                            <span class="badge" style="background:#e0e7ff; color:#3730a3;">Airdrop</span>
+                        {% else %}
+                            <span class="badge" style="background:#d1fae5; color:#065f46;">Income</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+            <tfoot>
+                <tr style="font-weight:600; border-top:2px solid #ccc;">
+                    <td colspan="3">Total</td>
+                    <td style="text-align:right;">${{ "{:,.2f}".format(total_income) }}</td>
+                    <td></td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:#888;">No income or airdrop transactions found. Classify transactions on the Wallets page first.</p>
+    {% endif %}
+</div>
+
+<!-- PDF Modal -->
+<div id="pdf-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:#fff; border-radius:8px; padding:24px; min-width:340px; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+        <h3 style="margin:0 0 16px 0;">Generate Form 8949 PDF</h3>
+        <form action="{{ url_for('form8949_pdf') }}" method="get" target="_blank">
+            <div style="margin-bottom:12px;">
+                <label style="display:block; font-size:0.9em; color:#555; margin-bottom:4px;">Name (optional)</label>
+                <input type="text" name="name" placeholder="e.g., Adam Kraft" style="width:100%; padding:8px 12px; border:1px solid #ddd; border-radius:6px; font-size:1em;">
+            </div>
+            <div style="margin-bottom:16px;">
+                <label style="display:block; font-size:0.9em; color:#555; margin-bottom:4px;">SSN (optional)</label>
+                <input type="text" name="ssn" placeholder="e.g., 123-45-6789" style="width:100%; padding:8px 12px; border:1px solid #ddd; border-radius:6px; font-size:1em;">
+            </div>
+            <div style="display:flex; gap:8px; justify-content:flex-end;">
+                <button type="button" class="btn btn-sm btn-secondary" onclick="document.getElementById('pdf-modal').style.display='none'">Cancel</button>
+                <button type="submit" class="btn btn-sm" onclick="setTimeout(()=>document.getElementById('pdf-modal').style.display='none',100)">Generate PDF</button>
+            </div>
+        </form>
+    </div>
 </div>
 {% endblock %}

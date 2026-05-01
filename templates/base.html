@@ -195,6 +195,7 @@
         <nav class="nav">
             <a href="{{ url_for('positions') }}" class="{% if active_nav == 'positions' %}active{% endif %}">Opening Positions</a>
             <a href="{{ url_for('wallets') }}" class="{% if active_nav == 'wallets' %}active{% endif %}">Wallets</a>
+            <a href="{{ url_for('reconcile') }}" class="{% if active_nav == 'reconcile' %}active{% endif %}">Reconcile</a>
             <a href="{{ url_for('reports') }}" class="{% if active_nav == 'reports' %}active{% endif %}">Reports</a>
         </nav>
         {% block content %}{% endblock %}
