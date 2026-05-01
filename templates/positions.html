@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="stats">
+    <div class="stat-box">
+        <div class="label">Total Lots</div>
+        <div class="value">{{ stats.total_lots }}</div>
+    </div>
+    <div class="stat-box">
+        <div class="label">Unique Tokens</div>
+        <div class="value">{{ stats.unique_tokens }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="toolbar">
+        <div class="filter-bar">
+            <input type="text" id="symbolFilter" placeholder="Filter by symbol..." autofocus>
+        </div>
+        <div>
+            <span id="rowCount" style="margin-right: 12px; color: #666;"></span>
+            <form action="{{ url_for('reset') }}" method="post" style="display:inline;">
+                <button type="submit" class="btn btn-danger" onclick="return confirm('Remove all data and start over?')">Reset</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="table-wrapper">
+        <table id="positionsTable">
+            <thead>
+                <tr>
+                    <th data-col="date">Date</th>
+                    <th data-col="symbol">Symbol</th>
+                    <th data-col="account">Account</th>
+                    <th data-col="volume">Volume</th>
+                    <th data-col="price">Price</th>
+                    <th data-col="currency">Currency</th>
+                    <th data-col="fee">Fee</th>
+                    <th data-col="total">Total</th>
+                    <th data-col="memo">Memo</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in positions %}
+                <tr data-symbol="{{ p.symbol|lower }}">
+                    <td>{{ p.date }}</td>
+                    <td><strong>{{ p.symbol }}</strong></td>
+                    <td>{{ p.account }}</td>
+                    <td>{{ p.volume }}</td>
+                    <td>{{ p.price }}</td>
+                    <td>{{ p.currency }}</td>
+                    <td>{{ p.fee }}</td>
+                    <td>{{ p.total }}</td>
+                    <td>{{ p.memo }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const filter = document.getElementById('symbolFilter');
+    const table = document.getElementById('positionsTable');
+    const rows = table.querySelectorAll('tbody tr');
+    const rowCount = document.getElementById('rowCount');
+
+    function updateCount() {
+        const visible = table.querySelectorAll('tbody tr:not([style*="display: none"])').length;
+        rowCount.textContent = visible + ' of ' + rows.length + ' lots';
+    }
+
+    filter.addEventListener('input', function() {
+        const val = this.value.toLowerCase().trim();
+        rows.forEach(function(row) {
+            const symbol = row.getAttribute('data-symbol');
+            if (!val || symbol.indexOf(val) !== -1) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+        updateCount();
+    });
+
+    // Column sorting
+    let sortCol = null;
+    let sortAsc = true;
+
+    table.querySelectorAll('th').forEach(function(th) {
+        th.addEventListener('click', function() {
+            const col = this.getAttribute('data-col');
+            if (sortCol === col) {
+                sortAsc = !sortAsc;
+            } else {
+                sortCol = col;
+                sortAsc = true;
+            }
+            const colIndex = Array.from(this.parentNode.children).indexOf(this);
+            const rowsArr = Array.from(rows);
+            rowsArr.sort(function(a, b) {
+                let aVal = a.children[colIndex].textContent.trim();
+                let bVal = b.children[colIndex].textContent.trim();
+                // Try numeric
+                let aNum = parseFloat(aVal);
+                let bNum = parseFloat(bVal);
+                if (!isNaN(aNum) && !isNaN(bNum)) {
+                    return sortAsc ? aNum - bNum : bNum - aNum;
+                }
+                return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+            });
+            const tbody = table.querySelector('tbody');
+            rowsArr.forEach(function(row) { tbody.appendChild(row); });
+            updateCount();
+        });
+    });
+
+    updateCount();
+})();
+</script>
+{% endblock %}

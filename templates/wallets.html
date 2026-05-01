@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Wallet Configuration</h2>
+    <p style="margin-bottom: 16px; color: #666;">
+        Add your wallet addresses (up to 6). Transactions between these wallets will be recognized as transfers.
+    </p>
+
+    {% if wallets|length < 6 %}
+    <form action="{{ url_for('add_wallet') }}" method="post" style="display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap;">
+        <input type="text" name="address" id="wallet-address" placeholder="0x address" required
+               style="padding:8px 12px; border:1px solid #ddd; border-radius:6px; width:400px; font-family:monospace; font-size:0.9em;">
+        <input type="text" name="label" id="wallet-label" placeholder="Label (auto-generated)" required readonly
+               style="padding:8px 12px; border:1px solid #ddd; border-radius:6px; width:180px; background:#f9f9f9;">
+        <button type="submit" class="btn btn-sm">Add Wallet</button>
+    </form>
+    <script>
+    document.getElementById('wallet-address').addEventListener('input', function() {
+        var addr = this.value.trim();
+        var label = document.getElementById('wallet-label');
+        if (addr.length >= 10 && addr.startsWith('0x')) {
+            label.value = addr.slice(0, 6) + '...' + addr.slice(-4);
+        } else {
+            label.value = '';
+        }
+    });
+    </script>
+    {% endif %}
+
+    {% if wallets %}
+    <table>
+        <thead>
+            <tr>
+                <th>Label</th>
+                <th>Address</th>
+                <th>Transactions</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for w in wallets %}
+            <tr>
+                <td><strong>{{ w.label }}</strong></td>
+                <td style="font-family:monospace; font-size:0.85em;">{{ w.address[:8] }}...{{ w.address[-6:] }}</td>
+                <td>
+                    {% set status = wallet_status.get(w.id, {'total': 0, 'needs_review': 0}) %}
+                    {{ status.total }} txns
+                </td>
+                <td>
+                    {% set status = wallet_status.get(w.id, {'total': 0, 'needs_review': 0}) %}
+                    {% if status.total == 0 %}
+                        <span style="color:#888;">No data</span>
+                    {% elif status.needs_review > 0 %}
+                        <span class="badge">{{ status.needs_review }} need review</span>
+                    {% else %}
+                        <span class="badge badge-success">All classified</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="{{ url_for('wallet_detail', wallet_id=w.id) }}" class="btn btn-sm">View</a>
+                    <form action="{{ url_for('remove_wallet', wallet_id=w.id) }}" method="post" style="display:inline;">
+                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Remove this wallet?')">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:#888;">No wallets configured yet. Add one above to get started.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Known Addresses</h2>
+    <p style="margin-bottom: 16px; color: #666;">
+        Add external addresses you recognize (e.g., Coinbase). Transactions to/from these will be auto-classified as transfers.
+    </p>
+
+    <form action="{{ url_for('add_known_address') }}" method="post" style="display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap;">
+        <input type="text" name="label" placeholder="Label (e.g., Coinbase)" required
+               style="padding:8px 12px; border:1px solid #ddd; border-radius:6px; width:180px;">
+        <input type="text" name="address" placeholder="0x address" required
+               style="padding:8px 12px; border:1px solid #ddd; border-radius:6px; width:400px; font-family:monospace; font-size:0.9em;">
+        <button type="submit" class="btn btn-sm">Add</button>
+    </form>
+
+    {% if known_addresses %}
+    <table>
+        <thead>
+            <tr>
+                <th>Label</th>
+                <th>Address</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ka in known_addresses %}
+            {% for addr in ka.addresses %}
+            <tr>
+                <td><strong>{{ ka.label }}</strong></td>
+                <td style="font-family:monospace; font-size:0.85em;">{{ addr[:8] }}...{{ addr[-6:] }}</td>
+                <td>
+                    <form action="{{ url_for('remove_known_address') }}" method="post" style="display:inline;">
+                        <input type="hidden" name="label" value="{{ ka.label }}">
+                        <input type="hidden" name="address" value="{{ addr }}">
+                        <button type="submit" class="btn btn-sm btn-danger">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:#888;">No known addresses yet.</p>
+    {% endif %}
+</div>
+{% endblock %}

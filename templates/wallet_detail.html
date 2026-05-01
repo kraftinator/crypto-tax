@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .sub-row { display: none; background: #f5f8fc; }
+    .sub-row td { padding: 4px 12px; font-size: 0.88em; border-top: none; }
+    .sub-row .indent { padding-left: 32px; }
+    .expand-toggle { cursor: pointer; user-select: none; }
+    .expand-toggle:hover { color: #2563eb; }
+    .direction-sent { color: #dc2626; }
+    .direction-received { color: #16a34a; }
+    .direction-fee { color: #9333ea; }
+    .warning-icon { color: #f59e0b; font-size: 0.9em; margin-left: 4px; }
+</style>
+
+<div class="card">
+    <div class="toolbar">
+        <div>
+            <h2>{{ wallet.label }} <span style="font-size:0.6em; color:#888; font-family:monospace;">{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}</span></h2>
+            <p style="color:#666; margin-top:4px;">
+                {{ total_count }} transactions
+                {% if needs_review_count > 0 %}
+                    — <span class="badge">{{ needs_review_count }} need review</span>
+                {% elif total_count > 0 %}
+                    — <span class="badge badge-success">All classified</span>
+                {% endif %}
+            </p>
+        </div>
+        <a href="{{ url_for('wallets') }}" class="btn btn-sm btn-secondary">Back to Wallets</a>
+    </div>
+
+    <form action="{{ url_for('upload_wallet_csv', wallet_id=wallet.id) }}" method="post" enctype="multipart/form-data"
+          style="margin:16px 0; padding:16px; background:#f9f9f9; border-radius:6px;">
+        <strong>Upload CSV:</strong>
+        <input type="file" name="file" accept=".csv" required style="margin:0 12px;">
+        <button type="submit" class="btn btn-sm">Upload</button>
+    </form>
+
+    {% if transactions %}
+    <div class="toolbar">
+        <div class="filter-bar">
+            <input type="text" id="txFilter" placeholder="Filter by type or details..." style="width:300px;">
+            <label style="margin-left:12px; font-size:0.9em;">
+                <input type="checkbox" id="showNeedsReview"> Show only needs review
+            </label>
+        </div>
+        <span id="txCount" style="color:#666;"></span>
+    </div>
+
+    <div class="table-wrapper">
+        <table id="txTable">
+            <thead>
+                <tr>
+                    <th data-col="date">Date</th>
+                    <th data-col="type">Type</th>
+                    <th data-col="details">Details</th>
+                    <th data-col="value">Value (USD)</th>
+                    <th data-col="blockchain">Chain</th>
+                    <th>TxHash</th>
+                    <th>Classification</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for tx in transactions %}
+                <tr class="parent-row {% if tx.is_multi %}{% if tx.classification_summary not in ('All classified', 'Trade') and tx.classification_summary != '' %}needs-review{% elif tx.classification_summary == '' and tx.needs_classification %}needs-review{% endif %}{% elif tx.single_show_dropdown and not tx.single_classification %}needs-review{% endif %}"
+                    data-type="{{ tx.type|lower }}"
+                    data-details="{{ tx.details|lower }}"
+                    data-needs-review="{% if tx.is_multi %}{{ 'no' if tx.classification_summary in ('All classified', 'Trade') else ('no' if not tx.needs_classification else 'yes') }}{% else %}{{ 'yes' if (tx.single_show_dropdown and not tx.single_classification) else 'no' }}{% endif %}"
+                    data-index="{{ tx.index }}">
+                    <td>{{ tx.date }}</td>
+                    <td><strong>{{ tx.type }}</strong></td>
+                    <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis;" title="{{ tx.details }}">
+                        {% if tx.is_multi %}
+                            <span class="expand-toggle" data-target="sub-{{ tx.index }}">&#9654;</span>
+                        {% endif %}
+                        {{ tx.details }}
+                    </td>
+                    <td>{{ tx.value }}</td>
+                    <td>{{ tx.blockchain }}</td>
+                    <td>
+                        {% if tx.url %}
+                            <a href="{{ tx.url }}" target="_blank" style="font-family:monospace; font-size:0.8em;">{{ tx.tx_hash[:8] }}...</a>
+                        {% elif tx.tx_hash %}
+                            <span style="font-family:monospace; font-size:0.8em;">{{ tx.tx_hash[:8] }}...</span>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if tx.is_multi %}
+                            {# Multi-token: show status summary on parent, dropdowns on sub-rows #}
+                            {% if tx.classification_summary == 'All classified' %}
+                                <span class="badge badge-success">All classified</span>
+                            {% elif tx.classification_summary == 'Trade' %}
+                                <span style="color:#888; font-size:0.85em;">Trade</span>
+                            {% elif tx.classification_summary %}
+                                <span class="badge">{{ tx.classification_summary }}</span>
+                            {% elif not tx.needs_classification %}
+                                <span style="color:#888; font-size:0.85em;">Auto</span>
+                            {% else %}
+                                <span class="badge">0 classified</span>
+                            {% endif %}
+                        {% else %}
+                            {# Single-token: show dropdown or auto label on the row itself #}
+                            {% if tx.single_show_dropdown %}
+                                <form action="{{ url_for('classify_transaction') }}" method="post" style="display:inline;">
+                                    <input type="hidden" name="tx_key" value="{{ tx.single_item_key }}">
+                                    <select name="classification" class="classify-select" onchange="this.form.submit()">
+                                        <option value="">-- Classify --</option>
+                                        <option value="Transfer" {% if tx.single_classification == 'Transfer' %}selected{% endif %}>Transfer</option>
+                                        <option value="Income" {% if tx.single_classification == 'Income' %}selected{% endif %}>Income</option>
+                                        <option value="Airdrop" {% if tx.single_classification == 'Airdrop' %}selected{% endif %}>Airdrop</option>
+                                        <option value="Staking" {% if tx.single_classification == 'Staking' %}selected{% endif %}>Staking</option>
+                                        <option value="Unstaking" {% if tx.single_classification == 'Unstaking' %}selected{% endif %}>Unstaking</option>
+                                        <option value="Payment" {% if tx.single_classification == 'Payment' %}selected{% endif %}>Payment</option>
+                                        <option value="Gift" {% if tx.single_classification == 'Gift' %}selected{% endif %}>Gift</option>
+                                        <option value="Ignore" {% if tx.single_classification == 'Ignore' %}selected{% endif %}>Ignore</option>
+                                    </select>
+                                </form>
+                            {% elif tx.single_auto_label %}
+                                <span style="color:#888; font-size:0.85em;">{{ tx.single_auto_label }}</span>
+                            {% else %}
+                                <span style="color:#888; font-size:0.85em;">Auto</span>
+                            {% endif %}
+                        {% endif %}
+                    </td>
+                </tr>
+                {% if tx.is_multi %}
+                    {% for item in tx.line_items %}
+                    <tr class="sub-row" data-parent="sub-{{ tx.index }}"
+                        data-type="{{ tx.type|lower }}"
+                        data-details="{{ item.token|lower }}"
+                        data-needs-review="{{ 'yes' if (item.show_dropdown and not item.classification) else 'no' }}">
+                        <td></td>
+                        <td></td>
+                        <td class="indent">
+                            <span class="direction-{{ item.direction }}">
+                                {% if item.direction == 'sent' %}&#x2191; Sent{% elif item.direction == 'received' %}&#x2193; Received{% else %}&#x2022; Fee{% endif %}
+                            </span>
+                            {{ item.amount }} {{ item.token }}
+                        </td>
+                        <td>
+                            {{ item.usd_value }}
+                            {% if item.missing_value %}<span class="warning-icon" title="Missing USD value">&#x26A0;</span>{% endif %}
+                        </td>
+                        <td></td>
+                        <td></td>
+                        <td>
+                            {% if item.direction != 'fee' %}
+                                {% if item.show_dropdown %}
+                                    <form action="{{ url_for('classify_transaction') }}" method="post" style="display:inline;">
+                                        <input type="hidden" name="tx_key" value="{{ item.item_key }}">
+                                        <select name="classification" class="classify-select" onchange="this.form.submit()">
+                                            <option value="">-- Classify --</option>
+                                            <option value="Transfer" {% if item.classification == 'Transfer' %}selected{% endif %}>Transfer</option>
+                                            <option value="Income" {% if item.classification == 'Income' %}selected{% endif %}>Income</option>
+                                            <option value="Airdrop" {% if item.classification == 'Airdrop' %}selected{% endif %}>Airdrop</option>
+                                            <option value="Staking" {% if item.classification == 'Staking' %}selected{% endif %}>Staking</option>
+                                            <option value="Unstaking" {% if item.classification == 'Unstaking' %}selected{% endif %}>Unstaking</option>
+                                            <option value="Payment" {% if item.classification == 'Payment' %}selected{% endif %}>Payment</option>
+                                            <option value="Gift" {% if item.classification == 'Gift' %}selected{% endif %}>Gift</option>
+                                            <option value="Ignore" {% if item.classification == 'Ignore' %}selected{% endif %}>Ignore</option>
+                                        </select>
+                                    </form>
+                                {% elif item.auto_label %}
+                                    <span style="color:#888; font-size:0.85em;">{{ item.auto_label }}</span>
+                                {% endif %}
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% elif total_count == 0 %}
+    <p style="color:#888; margin-top:16px;">No transactions loaded yet. Upload a Chain Glance CSV above.</p>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const filter = document.getElementById('txFilter');
+    const checkbox = document.getElementById('showNeedsReview');
+    const table = document.getElementById('txTable');
+    if (!table) return;
+    const parentRows = table.querySelectorAll('tbody tr.parent-row');
+    const countEl = document.getElementById('txCount');
+
+    // Expand/collapse toggle
+    table.addEventListener('click', function(e) {
+        const toggle = e.target.closest('.expand-toggle');
+        if (!toggle) return;
+        const target = toggle.getAttribute('data-target');
+        const subRows = table.querySelectorAll('tr[data-parent="' + target + '"]');
+        const isExpanded = toggle.textContent.trim() === '\u25BC';
+        if (isExpanded) {
+            toggle.innerHTML = '&#9654;';
+            subRows.forEach(function(r) { r.style.display = 'none'; });
+        } else {
+            toggle.innerHTML = '&#9660;';
+            subRows.forEach(function(r) { r.style.display = 'table-row'; });
+        }
+    });
+
+    function updateCount() {
+        const visible = table.querySelectorAll('tbody tr.parent-row:not([style*="display: none"])').length;
+        countEl.textContent = visible + ' of ' + parentRows.length + ' shown';
+    }
+
+    function applyFilters() {
+        const val = filter.value.toLowerCase().trim();
+        const onlyReview = checkbox.checked;
+        parentRows.forEach(function(row) {
+            const type = row.getAttribute('data-type');
+            const details = row.getAttribute('data-details');
+            const needsReview = row.getAttribute('data-needs-review') === 'yes';
+            let show = true;
+            if (val && type.indexOf(val) === -1 && details.indexOf(val) === -1) {
+                show = false;
+            }
+            if (onlyReview && !needsReview) {
+                show = false;
+            }
+            row.style.display = show ? '' : 'none';
+            // Also hide/show sub-rows
+            const idx = row.getAttribute('data-index');
+            const subRows = table.querySelectorAll('tr[data-parent="sub-' + idx + '"]');
+            if (!show) {
+                subRows.forEach(function(r) { r.style.display = 'none'; });
+                // Reset toggle
+                const toggle = row.querySelector('.expand-toggle');
+                if (toggle) toggle.innerHTML = '&#9654;';
+            }
+        });
+        updateCount();
+    }
+
+    filter.addEventListener('input', applyFilters);
+    checkbox.addEventListener('change', applyFilters);
+
+    // Column sorting
+    let sortCol = null;
+    let sortAsc = true;
+    table.querySelectorAll('th[data-col]').forEach(function(th) {
+        th.addEventListener('click', function() {
+            const col = this.getAttribute('data-col');
+            if (sortCol === col) { sortAsc = !sortAsc; } else { sortCol = col; sortAsc = true; }
+            const colIndex = Array.from(this.parentNode.children).indexOf(this);
+            const rowsArr = Array.from(parentRows);
+            rowsArr.sort(function(a, b) {
+                let aVal = a.children[colIndex].textContent.trim();
+                let bVal = b.children[colIndex].textContent.trim();
+                // For USD column, strip $ and commas for numeric sort
+                let aNum = parseFloat(aVal.replace(/[$,]/g, ''));
+                let bNum = parseFloat(bVal.replace(/[$,]/g, ''));
+                if (!isNaN(aNum) && !isNaN(bNum)) {
+                    return sortAsc ? aNum - bNum : bNum - aNum;
+                }
+                return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+            });
+            const tbody = table.querySelector('tbody');
+            rowsArr.forEach(function(row) {
+                tbody.appendChild(row);
+                // Move sub-rows after their parent
+                const idx = row.getAttribute('data-index');
+                const subRows = table.querySelectorAll('tr[data-parent="sub-' + idx + '"]');
+                subRows.forEach(function(r) { tbody.appendChild(r); });
+            });
+            updateCount();
+        });
+    });
+
+    updateCount();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h2>Upload Opening Positions</h2>
+    <p style="margin-bottom: 16px; color: #666;">
+        Upload your BitcoinTax opening positions CSV file to get started.
+    </p>
+    <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".csv" required>
+        <br>
+        <button type="submit" class="btn">Upload CSV</button>
+    </form>
+</div>
+{% endblock %}
