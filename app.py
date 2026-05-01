@@ -1838,6 +1838,8 @@ def income_csv():
     writer.writerow(['Date', 'Token', 'Amount', 'Fair Market Value (USD)', 'Type'])
     for r in rows:
         writer.writerow([r['date'], r['token'], r['amount'], f"{r['fmv_usd']:.2f}", r['type']])
+    total_fmv = sum(r['fmv_usd'] for r in rows)
+    writer.writerow(['TOTAL', '', '', f"{total_fmv:.2f}", ''])
 
     csv_data = output.getvalue()
     return Response(
