@@ -1,0 +1,16 @@
+# Data files - never commit financial data
+data/
+*.json
+!package.json
+
+# Uploaded CSVs
+uploads/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
