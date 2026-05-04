@@ -111,6 +111,8 @@
                                         <option value="Staking" {% if tx.single_classification == 'Staking' %}selected{% endif %}>Staking</option>
                                         <option value="Unstaking" {% if tx.single_classification == 'Unstaking' %}selected{% endif %}>Unstaking</option>
                                         <option value="Payment" {% if tx.single_classification == 'Payment' %}selected{% endif %}>Payment</option>
+                                        <option value="LP Deposit" {% if tx.single_classification == 'LP Deposit' %}selected{% endif %}>LP Deposit</option>
+                                        <option value="LP Withdrawal" {% if tx.single_classification == 'LP Withdrawal' %}selected{% endif %}>LP Withdrawal</option>
                                         <option value="Gift" {% if tx.single_classification == 'Gift' %}selected{% endif %}>Gift</option>
                                         <option value="Ignore" {% if tx.single_classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                     </select>
@@ -153,6 +155,8 @@
                                             <option value="Staking" {% if item.classification == 'Staking' %}selected{% endif %}>Staking</option>
                                             <option value="Unstaking" {% if item.classification == 'Unstaking' %}selected{% endif %}>Unstaking</option>
                                             <option value="Payment" {% if item.classification == 'Payment' %}selected{% endif %}>Payment</option>
+                                            <option value="LP Deposit" {% if item.classification == 'LP Deposit' %}selected{% endif %}>LP Deposit</option>
+                                            <option value="LP Withdrawal" {% if item.classification == 'LP Withdrawal' %}selected{% endif %}>LP Withdrawal</option>
                                             <option value="Gift" {% if item.classification == 'Gift' %}selected{% endif %}>Gift</option>
                                             <option value="Ignore" {% if item.classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                         </select>
@@ -185,9 +189,11 @@ function classifyItem(selectEl) {
         body: JSON.stringify({tx_key: txKey, classification: classification})
     }).then(function(resp) {
         if (resp.ok) {
-            // Brief visual feedback
+            // Brief visual feedback then reload to update auto-classifications
             selectEl.style.borderColor = '#16a34a';
-            setTimeout(function() { selectEl.style.borderColor = '#ddd'; }, 1000);
+            // Save scroll position and expanded state
+            sessionStorage.setItem('scrollPos', window.scrollY);
+            setTimeout(function() { window.location.reload(); }, 300);
         }
     });
 }
@@ -291,6 +297,13 @@ function classifyItem(selectEl) {
     // Default sort: oldest first (date ascending)
     var dateTh = table.querySelector('th[data-col="date"]');
     if (dateTh) dateTh.click();
+
+    // Restore scroll position after classification reload
+    var savedScroll = sessionStorage.getItem('scrollPos');
+    if (savedScroll) {
+        window.scrollTo(0, parseInt(savedScroll));
+        sessionStorage.removeItem('scrollPos');
+    }
 
     updateCount();
 })();

@@ -992,16 +992,19 @@ def wallet_detail(wallet_id):
         is_known_single = (not is_multi) and is_known_single_token(tx, known_addresses, addr_map)
 
         # Annotate each non-fee line item with classification info
-        # Check if this is a MINT with a Payment classification on sent items
+        # Check if this is a MINT with a Payment or LP Deposit classification on sent items
         is_payment_mint = False
+        is_lp_deposit_mint = False
         if tx.get('type', '').upper() == 'MINT':
             sent_idx = 0
             for li in line_items:
                 if li['direction'] == 'sent':
                     ik = f"{wallet_id}_{i}_{sent_idx}"
-                    if classifications.get(ik) == 'Payment':
+                    cl = classifications.get(ik, '')
+                    if cl == 'Payment':
                         is_payment_mint = True
-                        break
+                    elif cl == 'LP Deposit':
+                        is_lp_deposit_mint = True
                 if li['direction'] != 'fee':
                     sent_idx += 1
 
@@ -1025,11 +1028,24 @@ def wallet_detail(wallet_id):
                 li['show_dropdown'] = False
                 li['auto_label'] = 'Trade'
                 classified_count += 1
-            elif is_payment_mint and li['direction'] == 'received' and li.get('is_nft'):
-                # NFTs received in a payment mint are auto-classified as acquisition
+            elif is_lp_deposit_mint and li['direction'] == 'received' and li.get('is_nft'):
+                # LP deposit: NFT received is the LP position
                 li['show_dropdown'] = False
-                li['auto_label'] = 'Purchase'
+                li['auto_label'] = 'LP Position'
                 classified_count += 1
+            elif is_payment_mint and li['direction'] == 'received' and li.get('is_nft'):
+                # Payment mint: auto-classify only if sent items are fungible tokens (not NFTs)
+                sent_has_nft = any(s.get('is_nft') for s in tx.get('parsed_details', {}).get('sent', []))
+                if not sent_has_nft:
+                    li['show_dropdown'] = False
+                    li['auto_label'] = 'Purchase'
+                    classified_count += 1
+                else:
+                    # Sent item is an NFT (redemption) — let user classify
+                    li['show_dropdown'] = True
+                    li['auto_label'] = ''
+                    if li['classification']:
+                        classified_count += 1
             elif not needs_classification or is_known_single:
                 # Known address or no classification needed
                 li['show_dropdown'] = False
@@ -1062,13 +1078,40 @@ def wallet_detail(wallet_id):
         else:
             classification_summary = ''
 
-        # Format the value (USD) column — if original is $0, sum line items
+        # For LP deposits: recalculate NFT value as sum of all sent items
+        if is_lp_deposit_mint:
+            sent_total = 0
+            for li in line_items:
+                if li.get('direction') == 'sent':
+                    usd_str = li.get('usd_value', '$0.00').replace('$', '').replace(',', '')
+                    try:
+                        sent_total += abs(float(usd_str))
+                    except (ValueError, TypeError):
+                        pass
+            # Update NFT line item value
+            for li in line_items:
+                if li.get('direction') == 'received' and li.get('is_nft'):
+                    li['usd_value'] = format_usd(sent_total)
+                    li['missing_value'] = False
+
+        # Format the value (USD) column
         raw_value = tx.get('value', '')
         try:
             raw_float = float(raw_value) if raw_value else 0
         except (ValueError, TypeError):
             raw_float = 0
-        if raw_float == 0 and line_items:
+        if is_lp_deposit_mint:
+            # LP deposit: parent shows sum of sent items
+            sent_total = 0
+            for li in line_items:
+                if li.get('direction') == 'sent':
+                    usd_str = li.get('usd_value', '$0.00').replace('$', '').replace(',', '')
+                    try:
+                        sent_total += abs(float(usd_str))
+                    except (ValueError, TypeError):
+                        pass
+            formatted_value = format_usd(sent_total)
+        elif raw_float == 0 and line_items:
             # Use max of sent total vs received total (not sum of all, to avoid double-counting)
             sent_total = 0
             recv_total = 0
@@ -1428,14 +1471,17 @@ def reconcile():
             if tx_type == 'TRADE':
                 pass  # always include
             elif tx_type == 'MINT':
-                # Check if any sent item is classified as Payment
+                # Check if any sent item is classified as Payment or LP Deposit
                 has_payment = False
+                has_lp = False
                 for item_idx, _ in enumerate(tx.get('parsed_details', {}).get('sent', [])):
                     item_key = f"{wid}_{i}_{item_idx}"
-                    if classifications.get(item_key) == 'Payment':
+                    cl = classifications.get(item_key, '')
+                    if cl == 'Payment':
                         has_payment = True
-                        break
-                if not has_payment:
+                    elif cl == 'LP Deposit':
+                        has_lp = True
+                if not has_payment and not has_lp:
                     continue
             else:
                 continue
@@ -1443,21 +1489,66 @@ def reconcile():
             sent = details.get('sent', [])
             received = details.get('received', [])
 
-            # Sold info
-            sold_amount = ''
-            sold_token = ''
-            if sent:
-                sold_amount = format_amount(sent[0].get('amount', ''))
-                sold_token = sent[0].get('token', '')
+            # For Payment/LP MINTs
+            if tx_type == 'MINT':
+                if has_lp:
+                    # LP Deposit: multiple tokens sent, NFT received
+                    # Each sent token is a separate disposal; show first token for list
+                    sold_token = sent[0].get('token', '') if sent else ''
+                    sold_amount = format_amount(sent[0].get('amount', '')) if sent else ''
+                    # Show all sent tokens in description
+                    if len(sent) > 1:
+                        sold_token = ' + '.join(s.get('token', '') for s in sent)
+                        sold_amount = ''  # too complex for one number
 
-            # Received info
-            recv_amount = ''
-            recv_token = ''
-            if received:
-                recv_amount = format_amount(received[0].get('amount', ''))
-                recv_token = received[0].get('token', '')
+                    nft_item = next((r for r in received if r.get('is_nft')), None)
+                    recv_amount = format_amount(nft_item.get('amount', '')) if nft_item else ''
+                    recv_token = nft_item.get('token', '') if nft_item else ''
 
-            proceeds = get_trade_proceeds(tx)
+                    # Proceeds = sum of ALL sent items
+                    try:
+                        proceeds = sum(abs(float(s.get('usd_value', '0').replace('$','').replace(',',''))) for s in sent)
+                    except (ValueError, TypeError):
+                        proceeds = 0
+                else:
+                    # Payment: net same-token refunds
+                    sold_token = sent[0].get('token', '') if sent else ''
+                    try:
+                        total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
+                        total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
+                    except (ValueError, TypeError):
+                        total_sent = 0
+                        total_refund = 0
+                    net_amount = total_sent - total_refund
+                    sold_amount = format_amount(net_amount)
+
+                    nft_item = next((r for r in received if r.get('is_nft') or r.get('token') != sold_token), None)
+                    recv_amount = format_amount(nft_item.get('amount', '')) if nft_item else ''
+                    recv_token = nft_item.get('token', '') if nft_item else ''
+
+                    try:
+                        sent_usd = sum(abs(float(s.get('usd_value', '0').replace('$','').replace(',',''))) for s in sent if s.get('token') == sold_token)
+                        refund_usd = sum(abs(float(r.get('usd_value', '0').replace('$','').replace(',',''))) for r in received if r.get('token') == sold_token)
+                    except (ValueError, TypeError):
+                        sent_usd = 0
+                        refund_usd = 0
+                    proceeds = sent_usd - refund_usd
+            else:
+                # Sold info
+                sold_amount = ''
+                sold_token = ''
+                if sent:
+                    sold_amount = format_amount(sent[0].get('amount', ''))
+                    sold_token = sent[0].get('token', '')
+
+                # Received info
+                recv_amount = ''
+                recv_token = ''
+                if received:
+                    recv_amount = format_amount(received[0].get('amount', ''))
+                    recv_token = received[0].get('token', '')
+
+                proceeds = get_trade_proceeds(tx)
             recon_key = f"{wid}_{i}"
             status = 'Matched' if recon_key in reconciliations else 'Unmatched'
 
@@ -1506,22 +1597,45 @@ def reconcile_detail(wallet_id, tx_index):
     recon_key = f"{wallet_id}_{tx_index}"
     existing_recon = reconciliations.get(recon_key)
 
-    # Trade info
-    sold_token = sent[0].get('token', '') if sent else ''
-    sold_amount_raw = sent[0].get('amount', 0) if sent else 0
-    try:
-        sold_amount = abs(float(sold_amount_raw))
-    except (ValueError, TypeError):
-        sold_amount = 0
+    # Trade info — handle Payment MINTs with netting
+    tx_type = tx.get('type', '').upper()
+    if tx_type == 'MINT':
+        sold_token = sent[0].get('token', '') if sent else ''
+        try:
+            total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
+            total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
+        except (ValueError, TypeError):
+            total_sent = 0
+            total_refund = 0
+        sold_amount = total_sent - total_refund
 
-    recv_token = received[0].get('token', '') if received else ''
-    recv_amount_raw = received[0].get('amount', 0) if received else 0
-    try:
-        recv_amount = abs(float(recv_amount_raw))
-    except (ValueError, TypeError):
-        recv_amount = 0
+        nft_item = next((r for r in received if r.get('is_nft') or r.get('token') != sold_token), None)
+        recv_token = nft_item.get('token', '') if nft_item else ''
+        recv_amount = abs(float(nft_item.get('amount', 0))) if nft_item else 0
 
-    proceeds = get_trade_proceeds(tx)
+        try:
+            sent_usd = sum(abs(float(s.get('usd_value', '0').replace('$','').replace(',',''))) for s in sent if s.get('token') == sold_token)
+            refund_usd = sum(abs(float(r.get('usd_value', '0').replace('$','').replace(',',''))) for r in received if r.get('token') == sold_token)
+        except (ValueError, TypeError):
+            sent_usd = 0
+            refund_usd = 0
+        proceeds = sent_usd - refund_usd
+    else:
+        sold_token = sent[0].get('token', '') if sent else ''
+        sold_amount_raw = sent[0].get('amount', 0) if sent else 0
+        try:
+            sold_amount = abs(float(sold_amount_raw))
+        except (ValueError, TypeError):
+            sold_amount = 0
+
+        recv_token = received[0].get('token', '') if received else ''
+        recv_amount_raw = received[0].get('amount', 0) if received else 0
+        try:
+            recv_amount = abs(float(recv_amount_raw))
+        except (ValueError, TypeError):
+            recv_amount = 0
+
+        proceeds = get_trade_proceeds(tx)
 
     # All opening position lots for the sold token
     token_lots = []
@@ -1628,19 +1742,39 @@ def reconcile_confirm():
     tx = transactions[tx_index]
     details = tx.get('parsed_details', {})
     sent = details.get('sent', [])
-    sold_token = sent[0].get('token', '') if sent else ''
-    sold_amount_raw = sent[0].get('amount', 0) if sent else 0
-    try:
-        sold_amount = abs(float(sold_amount_raw))
-    except (ValueError, TypeError):
-        sold_amount = 0
+    received = details.get('received', [])
+    tx_type = tx.get('type', '').upper()
+
+    if tx_type == 'MINT':
+        sold_token = sent[0].get('token', '') if sent else ''
+        try:
+            total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
+            total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
+        except (ValueError, TypeError):
+            total_sent = 0
+            total_refund = 0
+        sold_amount = total_sent - total_refund
+        try:
+            sent_usd = sum(abs(float(s.get('usd_value', '0').replace('$','').replace(',',''))) for s in sent if s.get('token') == sold_token)
+            refund_usd = sum(abs(float(r.get('usd_value', '0').replace('$','').replace(',',''))) for r in received if r.get('token') == sold_token)
+        except (ValueError, TypeError):
+            sent_usd = 0
+            refund_usd = 0
+        proceeds = sent_usd - refund_usd
+    else:
+        sold_token = sent[0].get('token', '') if sent else ''
+        sold_amount_raw = sent[0].get('amount', 0) if sent else 0
+        try:
+            sold_amount = abs(float(sold_amount_raw))
+        except (ValueError, TypeError):
+            sold_amount = 0
+        proceeds = get_trade_proceeds(tx)
 
     wallet = next((w for w in state['wallets'] if w['id'] == wallet_id), None)
     if not wallet:
         return redirect(url_for('reconcile'))
 
     positions = state.get('positions', [])
-    proceeds = get_trade_proceeds(tx)
 
     # Build 2025 lots and run LIFO matching
     all_2025_lots = build_2025_lots(state, wallet_id)
