@@ -103,9 +103,7 @@
                         {% else %}
                             {# Single-token: show dropdown or auto label on the row itself #}
                             {% if tx.single_show_dropdown %}
-                                <form action="{{ url_for('classify_transaction') }}" method="post" style="display:inline;">
-                                    <input type="hidden" name="tx_key" value="{{ tx.single_item_key }}">
-                                    <select name="classification" class="classify-select" onchange="this.form.submit()">
+                                <select class="classify-select" data-tx-key="{{ tx.single_item_key }}" onchange="classifyItem(this)">
                                         <option value="">-- Classify --</option>
                                         <option value="Transfer" {% if tx.single_classification == 'Transfer' %}selected{% endif %}>Transfer</option>
                                         <option value="Income" {% if tx.single_classification == 'Income' %}selected{% endif %}>Income</option>
@@ -116,7 +114,6 @@
                                         <option value="Gift" {% if tx.single_classification == 'Gift' %}selected{% endif %}>Gift</option>
                                         <option value="Ignore" {% if tx.single_classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                     </select>
-                                </form>
                             {% elif tx.single_auto_label %}
                                 <span style="color:#888; font-size:0.85em;">{{ tx.single_auto_label }}</span>
                             {% else %}
@@ -148,9 +145,7 @@
                         <td>
                             {% if item.direction != 'fee' %}
                                 {% if item.show_dropdown %}
-                                    <form action="{{ url_for('classify_transaction') }}" method="post" style="display:inline;">
-                                        <input type="hidden" name="tx_key" value="{{ item.item_key }}">
-                                        <select name="classification" class="classify-select" onchange="this.form.submit()">
+                                    <select class="classify-select" data-tx-key="{{ item.item_key }}" onchange="classifyItem(this)">
                                             <option value="">-- Classify --</option>
                                             <option value="Transfer" {% if item.classification == 'Transfer' %}selected{% endif %}>Transfer</option>
                                             <option value="Income" {% if item.classification == 'Income' %}selected{% endif %}>Income</option>
@@ -161,7 +156,6 @@
                                             <option value="Gift" {% if item.classification == 'Gift' %}selected{% endif %}>Gift</option>
                                             <option value="Ignore" {% if item.classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                         </select>
-                                    </form>
                                 {% elif item.auto_label %}
                                     <span style="color:#888; font-size:0.85em;">{{ item.auto_label }}</span>
                                 {% endif %}
@@ -182,6 +176,22 @@
 
 {% block scripts %}
 <script>
+function classifyItem(selectEl) {
+    var txKey = selectEl.getAttribute('data-tx-key');
+    var classification = selectEl.value;
+    fetch('{{ url_for("classify_transaction") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tx_key: txKey, classification: classification})
+    }).then(function(resp) {
+        if (resp.ok) {
+            // Brief visual feedback
+            selectEl.style.borderColor = '#16a34a';
+            setTimeout(function() { selectEl.style.borderColor = '#ddd'; }, 1000);
+        }
+    });
+}
+
 (function() {
     const filter = document.getElementById('txFilter');
     const checkbox = document.getElementById('showNeedsReview');
@@ -277,6 +287,10 @@
             updateCount();
         });
     });
+
+    // Default sort: oldest first (date ascending)
+    var dateTh = table.querySelector('th[data-col="date"]');
+    if (dateTh) dateTh.click();
 
     updateCount();
 })();

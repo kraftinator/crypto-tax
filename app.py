@@ -99,6 +99,9 @@ def parse_wallet_csv(filepath):
             # Filter: only ETH, Base, and Polygon chains
             if blockchain.lower() not in ('eth', 'base', 'ethereum', 'matic', 'polygon'):
                 continue
+            # Filter out unsuccessful/reverted transactions
+            if cleaned.get('Unsuccessful', '').lower() in ('true', '1', 'yes'):
+                continue
             # Filter out non-taxable transaction types
             tx_type = cleaned.get('Type', '').upper()
             if tx_type in ('APPROVE', 'EXECUTE'):
@@ -151,12 +154,28 @@ def parse_ledgers(tx):
                     pretty = entry.get('prettyNativeAmount', '')
                     is_fee = entry.get('isFee', False)
 
+                    is_nft = entry.get('isNft', False)
+                    token_id = entry.get('tokenId', '')
+                    tx_info = entry.get('txInfo', {}) if isinstance(entry.get('txInfo'), dict) else {}
+
+                    # For NFTs, use the name from txInfo and include tokenId
+                    display_token = currency
+                    if is_nft and token_name and token_name != currency:
+                        display_token = token_name
+                    if is_nft and token_id and f"#{token_id}" not in display_token:
+                        display_token = f"{display_token} #{token_id}"
+
+                    contract_address = entry.get('contractAddress', '') or (tx_info.get('contractAddress', '') if tx_info else '')
+
                     item = {
                         'amount': amount,
-                        'token': currency,
+                        'token': display_token if is_nft else currency,
                         'token_name': token_name,
                         'usd_value': native_amount,
                         'pretty_usd': pretty,
+                        'is_nft': is_nft,
+                        'token_id': token_id,
+                        'contract_address': contract_address,
                     }
 
                     try:
@@ -165,6 +184,18 @@ def parse_ledgers(tx):
                         amt = 0
 
                     if is_fee:
+                        # Pull fee USD from Summary if not in ledger entry
+                        if not native_amount and not pretty:
+                            try:
+                                summary = json.loads(tx.get('summary', '{}'))
+                                fee_info = summary.get('fee', {})
+                                if fee_info:
+                                    fee_usd = fee_info.get('nativeAmount', 0)
+                                    fee_pretty = fee_info.get('prettyNativeAmount', '')
+                                    item['usd_value'] = str(abs(float(fee_usd))) if fee_usd else ''
+                                    item['pretty_usd'] = fee_pretty.replace('-', '') if fee_pretty else ''
+                            except (json.JSONDecodeError, TypeError, ValueError):
+                                pass
                         fee_items.append(item)
                     elif amt < 0:
                         item['amount'] = abs(amt)
@@ -266,6 +297,8 @@ def check_needs_classification(tx, known_addresses, known_addr_map=None):
         sender = tx.get('sender', '').lower()
         if sender and sender not in all_known:
             return True
+    elif tx_type == 'MINT':
+        return True  # MINTs always need classification
     return False
 
 def compute_stats(positions):
@@ -307,6 +340,7 @@ SYMBOL_TO_COINGECKO_ID = {
     'STETH': 'staked-ether',
     'CBETH': 'coinbase-wrapped-staked-eth',
     'RETH': 'rocket-pool-eth',
+    'DEGEN': 'degen-base',
 }
 
 
@@ -334,6 +368,46 @@ def parse_tx_date_for_coingecko(date_str):
     return cg_date, cache_key_date
 
 
+def date_str_to_unix(date_str):
+    """Convert ISO date string to unix timestamp for DefiLlama."""
+    try:
+        dt = datetime.strptime(date_str.replace('T', ' ').replace('Z', '').split('.')[0].strip(), '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        try:
+            dt = datetime.strptime(date_str.split('T')[0], '%Y-%m-%d')
+        except ValueError:
+            return None
+    return int(dt.timestamp())
+
+
+CHAIN_MAP = {
+    'eth': 'ethereum',
+    'ethereum': 'ethereum',
+    'base': 'base',
+    'matic': 'polygon',
+    'polygon': 'polygon',
+}
+
+
+def fetch_defillama_price(contract_address, blockchain, timestamp):
+    """Fetch historical price from DefiLlama. Returns price in USD or None."""
+    chain = CHAIN_MAP.get(blockchain.lower(), blockchain.lower())
+    coin_id = f"{chain}:{contract_address}"
+    url = f"https://coins.llama.fi/prices/historical/{timestamp}/{coin_id}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        coins = data.get('coins', {})
+        coin_data = coins.get(coin_id, {})
+        price = coin_data.get('price')
+        return price
+    except (requests.RequestException, ValueError, KeyError) as e:
+        print(f"  [DefiLlama] Error fetching {coin_id} at {timestamp}: {e}")
+        return None
+
+
 def fetch_coingecko_price(coingecko_id, cg_date):
     """Fetch historical price from CoinGecko. Returns price in USD or None."""
     url = f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/history?date={cg_date}"
@@ -350,10 +424,108 @@ def fetch_coingecko_price(coingecko_id, cg_date):
         return None
 
 
+def infer_prices_from_trades(transactions):
+    """Infer missing USD values from the other side of trades.
+    In a swap, what you gave = what you got in USD terms."""
+    for tx in transactions:
+        if tx.get('type', '').upper() not in ('TRADE', 'MINT'):
+            continue
+        details = tx.get('parsed_details', {})
+        sent = details.get('sent', [])
+        received = details.get('received', [])
+
+        # Calculate total known USD on each side
+        def side_usd(items):
+            total = 0
+            for item in items:
+                usd = item.get('usd_value', '') or item.get('pretty_usd', '')
+                if isinstance(usd, str):
+                    usd = usd.replace('$', '').replace(',', '').strip()
+                try:
+                    total += abs(float(usd)) if usd else 0
+                except (ValueError, TypeError):
+                    pass
+            return total
+
+        sent_usd = side_usd(sent)
+        received_usd = side_usd(received)
+
+        # Fill in missing values from the other side
+        def fill_zero_items(items, total_from_other_side):
+            """Fill $0 items using total from the other side minus known values on this side."""
+            known = 0
+            zero_items = []
+            for item in items:
+                usd = item.get('usd_value', '') or item.get('pretty_usd', '')
+                if isinstance(usd, str):
+                    usd = usd.replace('$', '').replace(',', '').strip()
+                try:
+                    val = abs(float(usd)) if usd else 0
+                except:
+                    val = 0
+                if val > 0:
+                    known += val
+                else:
+                    zero_items.append(item)
+            if zero_items and total_from_other_side > 0:
+                remainder = max(0, total_from_other_side - known)
+                share = remainder / len(zero_items)
+                for item in zero_items:
+                    item['usd_value'] = str(share)
+                    item['pretty_usd'] = f"${share:,.2f}"
+
+        if sent_usd > 0:
+            fill_zero_items(received, sent_usd)
+        # Recalculate received_usd after filling
+        received_usd = side_usd(received)
+        if received_usd > 0:
+            fill_zero_items(sent, received_usd)
+
+    # Also handle RECEIVEs/SENDs where the Volume field has a value but line items don't
+    for tx in transactions:
+        details = tx.get('parsed_details', {})
+        tx_value = tx.get('value', '')
+        try:
+            tx_usd = float(tx_value) if tx_value else 0
+        except:
+            tx_usd = 0
+        if tx_usd <= 0:
+            continue
+
+        for direction in ('sent', 'received'):
+            items = details.get(direction, [])
+            if len(items) == 1:
+                item = items[0]
+                usd = item.get('usd_value', '') or item.get('pretty_usd', '')
+                if isinstance(usd, str):
+                    usd = usd.replace('$', '').replace(',', '').strip()
+                try:
+                    val = abs(float(usd)) if usd else 0
+                except:
+                    val = 0
+                if val == 0:
+                    item['usd_value'] = str(tx_usd)
+                    item['pretty_usd'] = f"${tx_usd:,.2f}"
+
+
 def fill_missing_usd_values(transactions, state):
     """Scan transactions for missing USD values and look them up via CoinGecko."""
+    # First: infer prices from trade pairs (no API needed)
+    infer_prices_from_trades(transactions)
+
     price_cache = state.get('price_cache', {})
-    lookups_made = 0
+    # Track tokens that have failed before (by coingecko_id, not date-specific)
+    failed_tokens = set()
+    for k, v in price_cache.items():
+        if v is None:
+            # Extract token id (everything before the last _YYYY-MM-DD)
+            parts = k.rsplit('_', 1)
+            if len(parts) == 2:
+                failed_tokens.add(parts[0])
+
+    # First pass: collect all needed lookups to deduplicate
+    needed_lookups = {}  # cache_key -> (coingecko_id, cg_date, token)
+    items_to_fill = []   # (item_ref, cache_key, amount)
 
     for tx in transactions:
         details = tx.get('parsed_details', {})
@@ -364,7 +536,10 @@ def fill_missing_usd_values(transactions, state):
 
         for category in ('sent', 'received', 'fees'):
             for item in details.get(category, []):
-                # Check if USD value is missing
+                # Skip fee items — gas fees already have values embedded or are negligible
+                if category == 'fees':
+                    continue
+
                 usd_val = item.get('usd_value', '')
                 if isinstance(usd_val, str):
                     usd_val = usd_val.replace('$', '').replace(',', '').strip()
@@ -374,10 +549,10 @@ def fill_missing_usd_values(transactions, state):
                     usd_float = 0
 
                 if usd_float != 0:
-                    continue  # Already has a value
+                    continue
 
                 token = item.get('token', '')
-                if not token:
+                if not token or token == 'NFT':
                     continue
 
                 amount_str = item.get('amount', '0')
@@ -391,36 +566,67 @@ def fill_missing_usd_values(transactions, state):
                 coingecko_id = get_coingecko_id(token)
                 cache_key = f"{coingecko_id}_{cache_date}"
 
+                # Skip if already cached (including failed)
                 if cache_key in price_cache:
-                    price = price_cache[cache_key]
-                    if price is None:
-                        continue  # Previously failed, skip
-                    print(f"  [CoinGecko] Cache hit: {token} on {cache_date} = ${price}")
-                else:
-                    # Rate limit: delay between API calls
-                    if lookups_made > 0:
-                        time.sleep(1)
-                    print(f"  [CoinGecko] Looking up {token} ({coingecko_id}) on {cg_date}...")
-                    price = fetch_coingecko_price(coingecko_id, cg_date)
-                    lookups_made += 1
-                    # Cache the result (even None for failures)
-                    price_cache[cache_key] = price
-                    if price is not None:
-                        print(f"  [CoinGecko] Found: ${price} per {token}")
-                    else:
-                        print(f"  [CoinGecko] No price data for {token} on {cg_date}")
-                        continue
+                    if price_cache[cache_key] is not None:
+                        items_to_fill.append((item, cache_key, amount))
+                    continue
 
-                # Calculate USD value and update the item
-                usd_value = price * amount
-                item['usd_value'] = str(usd_value)
-                item['pretty_usd'] = f"${usd_value:,.2f}"
-                print(f"  [CoinGecko] Set {amount} {token} = ${usd_value:,.2f}")
+                # Skip if this token has failed before on any date
+                if coingecko_id in failed_tokens:
+                    price_cache[cache_key] = None
+                    continue
+
+                contract = item.get('contract_address', '')
+                blockchain = tx.get('blockchain', '')
+                needed_lookups[cache_key] = (coingecko_id, cg_date, token, contract, blockchain, date_str)
+                items_to_fill.append((item, cache_key, amount))
+
+    # Second pass: batch API calls (CoinGecko first, then DefiLlama fallback)
+    lookups_made = 0
+    for cache_key, (coingecko_id, cg_date, token, contract, blockchain, date_str) in needed_lookups.items():
+        if lookups_made > 0:
+            time.sleep(0.5)
+
+        # Try CoinGecko first
+        print(f"  [CoinGecko] Looking up {token} ({coingecko_id}) on {cg_date}...")
+        price = fetch_coingecko_price(coingecko_id, cg_date)
+        lookups_made += 1
+
+        # Fallback to DefiLlama if CoinGecko fails and we have a contract address
+        if price is None and contract and blockchain:
+            timestamp = date_str_to_unix(date_str)
+            if timestamp:
+                print(f"  [DefiLlama] Trying {token} ({blockchain}:{contract[:10]}...) ...")
+                price = fetch_defillama_price(contract, blockchain, timestamp)
+                if price is not None:
+                    print(f"  [DefiLlama] Found: ${price} per {token}")
+
+        price_cache[cache_key] = price
+        if price is not None:
+            print(f"  Found: ${price} per {token}")
+        else:
+            print(f"  No price data for {token} from any source")
+            failed_tokens.add(coingecko_id)
+
+    # Third pass: fill in values from cache
+    for item, cache_key, amount in items_to_fill:
+        price = price_cache.get(cache_key)
+        if price is None:
+            continue
+        usd_value = price * amount
+        item['usd_value'] = str(usd_value)
+        item['pretty_usd'] = f"${usd_value:,.2f}"
+        print(f"  [CoinGecko] Set {amount} {item.get('token', '?')} = ${usd_value:,.2f}")
 
     # Save the cache back to state
     state['price_cache'] = price_cache
     if lookups_made > 0:
         print(f"  [CoinGecko] Done. Made {lookups_made} API call(s).")
+
+    # Run inference again now that API lookups may have filled in prices
+    infer_prices_from_trades(transactions)
+
     return transactions
 
 
@@ -685,12 +891,15 @@ def build_line_items(tx):
             usd_float = abs(float(usd_val)) if usd_val else 0
         except (ValueError, TypeError):
             usd_float = 0
+        is_nft = item.get('is_nft', False)
+        amt = str(int(float(item.get('amount', '0')))) if is_nft else format_amount(item.get('amount', ''))
         line_items.append({
             'direction': 'sent',
-            'amount': format_amount(item.get('amount', '')),
+            'amount': amt,
             'token': item.get('token', ''),
             'usd_value': format_usd(usd_float),
             'missing_value': usd_float == 0,
+            'is_nft': is_nft,
         })
 
     for item in details.get('received', []):
@@ -701,12 +910,15 @@ def build_line_items(tx):
             usd_float = float(usd_val) if usd_val else 0
         except (ValueError, TypeError):
             usd_float = 0
+        is_nft = item.get('is_nft', False)
+        amt = str(int(float(item.get('amount', '0')))) if is_nft else format_amount(item.get('amount', ''))
         line_items.append({
             'direction': 'received',
-            'amount': format_amount(item.get('amount', '')),
+            'amount': amt,
             'token': item.get('token', ''),
             'usd_value': format_usd(usd_float),
             'missing_value': usd_float == 0,
+            'is_nft': is_nft,
         })
 
     for item in details.get('fees', []):
@@ -780,6 +992,19 @@ def wallet_detail(wallet_id):
         is_known_single = (not is_multi) and is_known_single_token(tx, known_addresses, addr_map)
 
         # Annotate each non-fee line item with classification info
+        # Check if this is a MINT with a Payment classification on sent items
+        is_payment_mint = False
+        if tx.get('type', '').upper() == 'MINT':
+            sent_idx = 0
+            for li in line_items:
+                if li['direction'] == 'sent':
+                    ik = f"{wallet_id}_{i}_{sent_idx}"
+                    if classifications.get(ik) == 'Payment':
+                        is_payment_mint = True
+                        break
+                if li['direction'] != 'fee':
+                    sent_idx += 1
+
         item_idx = 0
         classified_count = 0
         total_classifiable = 0
@@ -799,6 +1024,11 @@ def wallet_detail(wallet_id):
                 # Trades are always auto-classified (taxable disposal)
                 li['show_dropdown'] = False
                 li['auto_label'] = 'Trade'
+                classified_count += 1
+            elif is_payment_mint and li['direction'] == 'received' and li.get('is_nft'):
+                # NFTs received in a payment mint are auto-classified as acquisition
+                li['show_dropdown'] = False
+                li['auto_label'] = 'Purchase'
                 classified_count += 1
             elif not needs_classification or is_known_single:
                 # Known address or no classification needed
@@ -839,14 +1069,20 @@ def wallet_detail(wallet_id):
         except (ValueError, TypeError):
             raw_float = 0
         if raw_float == 0 and line_items:
-            total_usd = 0
+            # Use max of sent total vs received total (not sum of all, to avoid double-counting)
+            sent_total = 0
+            recv_total = 0
             for li in line_items:
                 usd_str = li.get('usd_value', '$0.00').replace('$', '').replace(',', '')
                 try:
-                    total_usd += abs(float(usd_str))
+                    val = abs(float(usd_str))
                 except (ValueError, TypeError):
-                    pass
-            formatted_value = format_usd(total_usd)
+                    val = 0
+                if li.get('direction') == 'sent':
+                    sent_total += val
+                elif li.get('direction') == 'received':
+                    recv_total += val
+            formatted_value = format_usd(max(sent_total, recv_total))
         else:
             formatted_value = format_usd(raw_value) if raw_value else '$0.00'
 
@@ -888,9 +1124,17 @@ def wallet_detail(wallet_id):
 
 @app.route('/wallets/classify', methods=['POST'])
 def classify_transaction():
-    tx_key = request.form.get('tx_key', '')  # format: walletId_txIndex_itemIndex
-    classification = request.form.get('classification', '')
+    # Support both form and JSON submissions
+    if request.is_json:
+        data = request.get_json()
+        tx_key = data.get('tx_key', '')
+        classification = data.get('classification', '')
+    else:
+        tx_key = request.form.get('tx_key', '')
+        classification = request.form.get('classification', '')
     if not tx_key:
+        if request.is_json:
+            return jsonify({'status': 'error', 'message': 'No tx_key'}), 400
         return redirect(url_for('wallets'))
     state = ensure_state()
     if classification:
@@ -898,6 +1142,8 @@ def classify_transaction():
     else:
         state['classifications'].pop(tx_key, None)
     save_state(state)
+    if request.is_json:
+        return jsonify({'status': 'ok', 'tx_key': tx_key, 'classification': classification})
     # Redirect back to the wallet detail page
     wallet_id = tx_key.split('_')[0]
     return redirect(url_for('wallet_detail', wallet_id=wallet_id))
@@ -1008,6 +1254,45 @@ def build_2025_lots(state, wallet_id):
                     'tx_index': tx_index,
                     'item_index': item_index,
                 })
+
+        elif tx_type == 'MINT':
+            # Check if any sent item is classified as Payment — received items become lots
+            has_payment = False
+            for item_idx, _ in enumerate(details.get('sent', [])):
+                item_key = f"{wallet_id}_{tx_index}_{item_idx}"
+                if classifications.get(item_key) == 'Payment':
+                    has_payment = True
+                    break
+            if has_payment:
+                received = details.get('received', [])
+                for item_index, item in enumerate(received):
+                    token = item.get('token', '')
+                    try:
+                        amount = abs(float(item.get('amount', 0)))
+                    except (ValueError, TypeError):
+                        amount = 0
+                    if amount <= 0:
+                        continue
+                    usd_val = item.get('usd_value', '') or item.get('pretty_usd', '')
+                    if isinstance(usd_val, str):
+                        usd_val = usd_val.replace('$', '').replace(',', '').strip()
+                    try:
+                        total_usd = abs(float(usd_val)) if usd_val else 0
+                    except (ValueError, TypeError):
+                        total_usd = 0
+                    price_per = total_usd / amount if amount > 0 else 0
+
+                    lots.append({
+                        'date': tx_date,
+                        'symbol': token,
+                        'volume': amount,
+                        'price': price_per,
+                        'total': total_usd,
+                        'account': wallet_address,
+                        'source': '2025_mint',
+                        'tx_index': tx_index,
+                        'item_index': item_index,
+                    })
 
     return lots
 
@@ -1128,6 +1413,7 @@ def reconcile():
     state = ensure_state()
     transactions = state.get('transactions', {})
     reconciliations = state.get('reconciliations', {})
+    classifications = state.get('classifications', {})
     wallet_list = state.get('wallets', [])
     wallet_map = {w['id']: w for w in wallet_list}
 
@@ -1137,7 +1423,21 @@ def reconcile():
         if not wallet:
             continue
         for i, tx in enumerate(txs):
-            if tx.get('type', '').upper() != 'TRADE':
+            tx_type = tx.get('type', '').upper()
+            # Include TRADEs and MINTs with Payment classification
+            if tx_type == 'TRADE':
+                pass  # always include
+            elif tx_type == 'MINT':
+                # Check if any sent item is classified as Payment
+                has_payment = False
+                for item_idx, _ in enumerate(tx.get('parsed_details', {}).get('sent', [])):
+                    item_key = f"{wid}_{i}_{item_idx}"
+                    if classifications.get(item_key) == 'Payment':
+                        has_payment = True
+                        break
+                if not has_payment:
+                    continue
+            else:
                 continue
             details = tx.get('parsed_details', {})
             sent = details.get('sent', [])
@@ -1195,7 +1495,7 @@ def reconcile_detail(wallet_id, tx_index):
         return redirect(url_for('reconcile'))
 
     tx = transactions[tx_index]
-    if tx.get('type', '').upper() != 'TRADE':
+    if tx.get('type', '').upper() not in ('TRADE', 'MINT'):
         return redirect(url_for('reconcile'))
 
     details = tx.get('parsed_details', {})
