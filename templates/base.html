@@ -197,6 +197,7 @@
             <a href="{{ url_for('wallets') }}" class="{% if active_nav == 'wallets' %}active{% endif %}">Wallets</a>
             <a href="{{ url_for('reconcile') }}" class="{% if active_nav == 'reconcile' %}active{% endif %}">Reconcile</a>
             <a href="{{ url_for('reports') }}" class="{% if active_nav == 'reports' %}active{% endif %}">Reports</a>
+            <a href="{{ url_for('backup') }}" style="margin-left:auto; font-size:0.85em; color:#888;" onclick="event.preventDefault(); fetch('/backup', {method:'POST'}).then(r=>r.json()).then(d=>{if(d.ok)this.textContent='Backed up ✓'; setTimeout(()=>this.textContent='Backup',2000);});">Backup</a>
         </nav>
         {% block content %}{% endblock %}
     </div>

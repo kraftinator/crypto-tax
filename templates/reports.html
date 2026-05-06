@@ -37,7 +37,7 @@
 <!-- Form 8949 Section -->
 <div class="card">
     <div class="toolbar">
-        <h2>Form 8949 - Capital Gains & Losses</h2>
+        <h2>Form 8949 - Capital Gains & Losses <span style="font-size:0.5em; color:#888;">({{ cost_basis_method }})</span></h2>
         <div style="display:flex; gap:8px;">
             <a href="{{ url_for('form8949_csv') }}" class="btn btn-sm">Download CSV</a>
             <button class="btn btn-sm btn-secondary" onclick="document.getElementById('pdf-modal').style.display='flex'">Download PDF</button>
@@ -46,16 +46,16 @@
 
     {% if form8949_rows %}
     <div class="table-wrapper">
-        <table>
+        <table id="form8949Table">
             <thead>
                 <tr>
-                    <th>Description</th>
-                    <th>Date Acquired</th>
-                    <th>Date Sold</th>
-                    <th style="text-align:right;">Proceeds</th>
-                    <th style="text-align:right;">Cost Basis</th>
-                    <th style="text-align:right;">Gain or Loss</th>
-                    <th>Term</th>
+                    <th data-col="desc" style="cursor:pointer;">Description</th>
+                    <th data-col="acq" style="cursor:pointer;">Date Acquired</th>
+                    <th data-col="sold" style="cursor:pointer;">Date Sold</th>
+                    <th data-col="proceeds" style="text-align:right; cursor:pointer;">Proceeds</th>
+                    <th data-col="basis" style="text-align:right; cursor:pointer;">Cost Basis</th>
+                    <th data-col="gl" style="text-align:right; cursor:pointer;">Gain or Loss</th>
+                    <th data-col="term" style="cursor:pointer;">Term</th>
                 </tr>
             </thead>
             <tbody>
@@ -171,4 +171,41 @@
         </form>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var table = document.getElementById('form8949Table');
+    if (!table) return;
+    var sortCol = null;
+    var sortAsc = true;
+
+    table.querySelectorAll('th[data-col]').forEach(function(th) {
+        th.addEventListener('click', function() {
+            var col = this.getAttribute('data-col');
+            if (sortCol === col) { sortAsc = !sortAsc; } else { sortCol = col; sortAsc = true; }
+            var colIndex = Array.from(this.parentNode.children).indexOf(this);
+            var tbody = table.querySelector('tbody');
+            var rows = Array.from(tbody.querySelectorAll('tr'));
+            rows.sort(function(a, b) {
+                var aVal = a.children[colIndex].textContent.trim();
+                var bVal = b.children[colIndex].textContent.trim();
+                // Date columns: sort as strings
+                if (col === 'acq' || col === 'sold') {
+                    return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+                }
+                // Numeric columns: strip $ and , and +
+                var aNum = parseFloat(aVal.replace(/[$,+]/g, ''));
+                var bNum = parseFloat(bVal.replace(/[$,+]/g, ''));
+                if (!isNaN(aNum) && !isNaN(bNum)) {
+                    return sortAsc ? aNum - bNum : bNum - aNum;
+                }
+                return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+            });
+            rows.forEach(function(row) { tbody.appendChild(row); });
+        });
+    });
+})();
+</script>
 {% endblock %}

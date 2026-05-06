@@ -29,12 +29,80 @@
         <a href="{{ url_for('wallets') }}" class="btn btn-sm btn-secondary">Back to Wallets</a>
     </div>
 
-    <form action="{{ url_for('upload_wallet_csv', wallet_id=wallet.id) }}" method="post" enctype="multipart/form-data"
-          style="margin:16px 0; padding:16px; background:#f9f9f9; border-radius:6px;">
-        <strong>Upload CSV:</strong>
-        <input type="file" name="file" accept=".csv" required style="margin:0 12px;">
-        <button type="submit" class="btn btn-sm">Upload</button>
-    </form>
+    <div style="margin:16px 0; padding:16px; background:#f9f9f9; border-radius:6px; display:flex; align-items:center; gap:24px; flex-wrap:wrap;">
+        <form action="{{ url_for('upload_wallet_csv', wallet_id=wallet.id) }}" method="post" enctype="multipart/form-data"
+              style="display:flex; align-items:center; gap:8px;">
+            <strong>Upload CSV:</strong>
+            <input type="file" name="file" accept=".csv" required>
+            <button type="submit" class="btn btn-sm">Upload</button>
+        </form>
+        <button type="button" class="btn btn-sm" onclick="document.getElementById('manualTxForm').style.display = document.getElementById('manualTxForm').style.display === 'none' ? 'block' : 'none'">Add Transaction</button>
+    </div>
+
+    <div id="manualTxForm" style="display:none; margin:0 0 16px 0; padding:16px; background:#f0f4ff; border:1px solid #c7d2fe; border-radius:6px;">
+        <form action="{{ url_for('add_manual_transaction', wallet_id=wallet.id) }}" method="post">
+            <h4 style="margin:0 0 12px 0;">Add Manual Transaction</h4>
+            <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:end;">
+                <div>
+                    <label style="font-size:0.85em; display:block;">Date (YYYY-MM-DD HH:MM)</label>
+                    <input type="text" name="date" placeholder="2025-06-15 14:30" required style="width:170px;">
+                </div>
+                <div>
+                    <label style="font-size:0.85em; display:block;">Type</label>
+                    <select name="type" id="manualTxType" onchange="toggleTradeFields()" style="width:110px;">
+                        <option value="RECEIVE">RECEIVE</option>
+                        <option value="SEND">SEND</option>
+                        <option value="TRADE">TRADE</option>
+                    </select>
+                </div>
+                <div>
+                    <label style="font-size:0.85em; display:block;" id="tokenLabel">Token</label>
+                    <input type="text" name="token" placeholder="e.g. VIRGEN" required style="width:120px;">
+                </div>
+                <div>
+                    <label style="font-size:0.85em; display:block;" id="amountLabel">Amount</label>
+                    <input type="text" name="amount" placeholder="e.g. 7202.92" required style="width:130px;">
+                </div>
+                <div>
+                    <label style="font-size:0.85em; display:block;" id="usdLabel">USD Value</label>
+                    <input type="text" name="usd_value" placeholder="e.g. 118.85" style="width:120px;">
+                </div>
+                <div>
+                    <label style="font-size:0.85em; display:block;">Classification</label>
+                    <select name="classification" style="width:130px;">
+                        <option value="">-- None --</option>
+                        <option value="Ignore">Ignore</option>
+                        <option value="Transfer">Transfer</option>
+                        <option value="Income">Income</option>
+                        <option value="Airdrop">Airdrop</option>
+                        <option value="Staking">Staking</option>
+                        <option value="Unstaking">Unstaking</option>
+                        <option value="Payment">Payment</option>
+                        <option value="LP Deposit">LP Deposit</option>
+                    </select>
+                </div>
+            </div>
+            <div id="tradeFields" style="display:none; margin-top:12px;">
+                <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:end;">
+                    <div>
+                        <label style="font-size:0.85em; display:block;">Received Token</label>
+                        <input type="text" name="token2" placeholder="e.g. ETH" style="width:120px;">
+                    </div>
+                    <div>
+                        <label style="font-size:0.85em; display:block;">Received Amount</label>
+                        <input type="text" name="amount2" placeholder="e.g. 0.5" style="width:130px;">
+                    </div>
+                    <div>
+                        <label style="font-size:0.85em; display:block;">Received USD Value</label>
+                        <input type="text" name="usd_value2" placeholder="e.g. 1200.00" style="width:120px;">
+                    </div>
+                </div>
+            </div>
+            <div style="margin-top:12px;">
+                <button type="submit" class="btn btn-sm">Add Transaction</button>
+            </div>
+        </form>
+    </div>
 
     {% if transactions %}
     <div class="toolbar">
@@ -180,6 +248,25 @@
 
 {% block scripts %}
 <script>
+function toggleTradeFields() {
+    var type = document.getElementById('manualTxType').value;
+    var tradeFields = document.getElementById('tradeFields');
+    var tokenLabel = document.getElementById('tokenLabel');
+    var amountLabel = document.getElementById('amountLabel');
+    var usdLabel = document.getElementById('usdLabel');
+    if (type === 'TRADE') {
+        tradeFields.style.display = 'block';
+        tokenLabel.textContent = 'Sent Token';
+        amountLabel.textContent = 'Sent Amount';
+        usdLabel.textContent = 'Sent USD Value';
+    } else {
+        tradeFields.style.display = 'none';
+        tokenLabel.textContent = 'Token';
+        amountLabel.textContent = 'Amount';
+        usdLabel.textContent = 'USD Value';
+    }
+}
+
 function classifyItem(selectEl) {
     var txKey = selectEl.getAttribute('data-tx-key');
     var classification = selectEl.value;
