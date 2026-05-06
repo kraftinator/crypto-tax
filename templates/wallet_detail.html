@@ -105,6 +105,7 @@
                             {% if tx.single_show_dropdown %}
                                 <select class="classify-select" data-tx-key="{{ tx.single_item_key }}" onchange="classifyItem(this)">
                                         <option value="">-- Classify --</option>
+                                        <option value="Ignore" {% if tx.single_classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                         <option value="Transfer" {% if tx.single_classification == 'Transfer' %}selected{% endif %}>Transfer</option>
                                         <option value="Income" {% if tx.single_classification == 'Income' %}selected{% endif %}>Income</option>
                                         <option value="Airdrop" {% if tx.single_classification == 'Airdrop' %}selected{% endif %}>Airdrop</option>
@@ -114,7 +115,6 @@
                                         <option value="LP Deposit" {% if tx.single_classification == 'LP Deposit' %}selected{% endif %}>LP Deposit</option>
                                         <option value="LP Withdrawal" {% if tx.single_classification == 'LP Withdrawal' %}selected{% endif %}>LP Withdrawal</option>
                                         <option value="Gift" {% if tx.single_classification == 'Gift' %}selected{% endif %}>Gift</option>
-                                        <option value="Ignore" {% if tx.single_classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                     </select>
                             {% elif tx.single_auto_label %}
                                 <span style="color:#888; font-size:0.85em;">{{ tx.single_auto_label }}</span>
@@ -149,6 +149,7 @@
                                 {% if item.show_dropdown %}
                                     <select class="classify-select" data-tx-key="{{ item.item_key }}" onchange="classifyItem(this)">
                                             <option value="">-- Classify --</option>
+                                            <option value="Ignore" {% if item.classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                             <option value="Transfer" {% if item.classification == 'Transfer' %}selected{% endif %}>Transfer</option>
                                             <option value="Income" {% if item.classification == 'Income' %}selected{% endif %}>Income</option>
                                             <option value="Airdrop" {% if item.classification == 'Airdrop' %}selected{% endif %}>Airdrop</option>
@@ -158,7 +159,6 @@
                                             <option value="LP Deposit" {% if item.classification == 'LP Deposit' %}selected{% endif %}>LP Deposit</option>
                                             <option value="LP Withdrawal" {% if item.classification == 'LP Withdrawal' %}selected{% endif %}>LP Withdrawal</option>
                                             <option value="Gift" {% if item.classification == 'Gift' %}selected{% endif %}>Gift</option>
-                                            <option value="Ignore" {% if item.classification == 'Ignore' %}selected{% endif %}>Ignore</option>
                                         </select>
                                 {% elif item.auto_label %}
                                     <span style="color:#888; font-size:0.85em;">{{ item.auto_label }}</span>
@@ -189,11 +189,19 @@ function classifyItem(selectEl) {
         body: JSON.stringify({tx_key: txKey, classification: classification})
     }).then(function(resp) {
         if (resp.ok) {
-            // Brief visual feedback then reload to update auto-classifications
             selectEl.style.borderColor = '#16a34a';
-            // Save scroll position and expanded state
-            sessionStorage.setItem('scrollPos', window.scrollY);
-            setTimeout(function() { window.location.reload(); }, 300);
+            setTimeout(function() { selectEl.style.borderColor = '#ddd'; }, 1000);
+            // Only reload for classifications that affect auto-classify (Payment, LP Deposit)
+            // For simple ones (Transfer, Income, Ignore, etc.), no reload needed
+            var needsReload = ['Payment', 'LP Deposit'].indexOf(classification) !== -1;
+            if (needsReload) {
+                sessionStorage.setItem('scrollPos', window.scrollY);
+                var filterEl = document.getElementById('txFilter');
+                if (filterEl && filterEl.value) sessionStorage.setItem('filterVal', filterEl.value);
+                var reviewBox = document.getElementById('showNeedsReview');
+                if (reviewBox && reviewBox.checked) sessionStorage.setItem('reviewChecked', '1');
+                setTimeout(function() { window.location.reload(); }, 300);
+            }
         }
     });
 }
@@ -236,7 +244,15 @@ function classifyItem(selectEl) {
             const needsReview = row.getAttribute('data-needs-review') === 'yes';
             let show = true;
             if (val && type.indexOf(val) === -1 && details.indexOf(val) === -1) {
-                show = false;
+                // Also search sub-row details
+                const idx = row.getAttribute('data-index');
+                const subs = table.querySelectorAll('tr[data-parent="sub-' + idx + '"]');
+                let subMatch = false;
+                subs.forEach(function(sub) {
+                    if (sub.getAttribute('data-details') && sub.getAttribute('data-details').indexOf(val) !== -1) subMatch = true;
+                    if (sub.textContent.toLowerCase().indexOf(val) !== -1) subMatch = true;
+                });
+                if (!subMatch) show = false;
             }
             if (onlyReview && !needsReview) {
                 show = false;
@@ -298,11 +314,23 @@ function classifyItem(selectEl) {
     var dateTh = table.querySelector('th[data-col="date"]');
     if (dateTh) dateTh.click();
 
-    // Restore scroll position after classification reload
+    // Restore state after classification reload
     var savedScroll = sessionStorage.getItem('scrollPos');
     if (savedScroll) {
         window.scrollTo(0, parseInt(savedScroll));
         sessionStorage.removeItem('scrollPos');
+    }
+    var savedFilter = sessionStorage.getItem('filterVal');
+    if (savedFilter && filter) {
+        filter.value = savedFilter;
+        sessionStorage.removeItem('filterVal');
+        applyFilters();
+    }
+    var savedReview = sessionStorage.getItem('reviewChecked');
+    if (savedReview && checkbox) {
+        checkbox.checked = true;
+        sessionStorage.removeItem('reviewChecked');
+        applyFilters();
     }
 
     updateCount();

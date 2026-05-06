@@ -6,17 +6,53 @@
         <div class="label">Trades Reconciled</div>
         <div class="value">{{ matched_count }} of {{ total_count }}</div>
     </div>
+    <div class="stat-box">
+        <div class="label">Cost Basis Method</div>
+        <div class="value">
+            <form action="{{ url_for('set_cost_basis_method') }}" method="post" style="display:inline;">
+                <select name="method" onchange="this.form.submit();" style="font-size:0.8em; padding:4px 8px; border:1px solid #ddd; border-radius:4px;">
+                    <option value="LIFO" {% if cost_basis_method == 'LIFO' %}selected{% endif %}>LIFO</option>
+                    <option value="FIFO" {% if cost_basis_method == 'FIFO' %}selected{% endif %}>FIFO</option>
+                </select>
+            </form>
+        </div>
+    </div>
 </div>
 
 <div class="card">
     <h2>Trade Transactions</h2>
     <p style="color:#666; margin-bottom:16px;">
-        Click a trade to reconcile it against your opening position lots using LIFO matching.
+        Click a trade to reconcile it against your opening position lots using {{ cost_basis_method }} matching.
     </p>
 
     {% if trades %}
+    <div style="margin-bottom:16px;">
+        <form action="{{ url_for('reconcile_all') }}" method="post" style="display:inline;">
+            <button type="submit" class="btn btn-sm">Reconcile All</button>
+        </form>
+        <span style="color:#666; font-size:0.85em; margin-left:8px;">Auto-confirms all trades with matching lots</span>
+    </div>
+    <div style="margin-bottom:12px; display:flex; gap:12px; align-items:center;">
+        <label style="font-size:0.9em; color:#555;">Wallet:
+            <select id="filterWallet" style="padding:4px 8px; border:1px solid #ddd; border-radius:4px; font-size:0.9em;">
+                <option value="">All</option>
+                {% set wallet_names = trades|map(attribute='wallet_label')|unique|list %}
+                {% for w in wallet_names %}
+                <option value="{{ w }}">{{ w }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label style="font-size:0.9em; color:#555;">Status:
+            <select id="filterStatus" style="padding:4px 8px; border:1px solid #ddd; border-radius:4px; font-size:0.9em;">
+                <option value="">All</option>
+                <option value="Matched">Matched</option>
+                <option value="Unmatched">Unmatched</option>
+            </select>
+        </label>
+        <span id="reconCount" style="color:#666; font-size:0.85em;"></span>
+    </div>
     <div class="table-wrapper">
-        <table>
+        <table style="width:auto;" id="reconTable">
             <thead>
                 <tr>
                     <th>Date</th>
@@ -29,11 +65,11 @@
             </thead>
             <tbody>
                 {% for t in trades %}
-                <tr style="cursor:pointer;" onclick="window.location='{{ url_for('reconcile_detail', wallet_id=t.wallet_id, tx_index=t.tx_index) }}'">
+                <tr style="cursor:pointer;" data-wallet="{{ t.wallet_label }}" data-status="{{ t.status }}" onclick="window.location='{{ url_for('reconcile_detail', wallet_id=t.wallet_id, tx_index=t.tx_index) }}'">
                     <td>{{ t.date }}</td>
                     <td>{{ t.wallet_label }}</td>
-                    <td><span style="color:#dc2626;">{{ t.sold_amount }} {{ t.sold_token }}</span></td>
-                    <td><span style="color:#16a34a;">{{ t.recv_amount }} {{ t.recv_token }}</span></td>
+                    <td><span style="color:#dc2626;">{{ t.sold_amount }} {{ t.sold_token[:30] }}{{ '...' if t.sold_token|length > 30 else '' }}</span></td>
+                    <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="color:#16a34a;">{{ t.recv_amount }} {{ t.recv_token[:30] }}{{ '...' if t.recv_token|length > 30 else '' }}</span></td>
                     <td>{{ t.proceeds }}</td>
                     <td>
                         {% if t.status == 'Matched' %}
@@ -51,4 +87,37 @@
     <p style="color:#888;">No trade transactions found. Upload wallet CSVs on the Wallets page first.</p>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var filterWallet = document.getElementById('filterWallet');
+    var filterStatus = document.getElementById('filterStatus');
+    var table = document.getElementById('reconTable');
+    var countEl = document.getElementById('reconCount');
+    if (!table) return;
+
+    function applyFilters() {
+        var wallet = filterWallet.value;
+        var status = filterStatus.value;
+        var rows = table.querySelectorAll('tbody tr');
+        var visible = 0;
+        rows.forEach(function(row) {
+            var w = row.getAttribute('data-wallet');
+            var s = row.getAttribute('data-status');
+            var show = true;
+            if (wallet && w !== wallet) show = false;
+            if (status && s !== status) show = false;
+            row.style.display = show ? '' : 'none';
+            if (show) visible++;
+        });
+        countEl.textContent = visible + ' of ' + rows.length + ' shown';
+    }
+
+    filterWallet.addEventListener('change', applyFilters);
+    filterStatus.addEventListener('change', applyFilters);
+    applyFilters();
+})();
+</script>
 {% endblock %}

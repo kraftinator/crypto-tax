@@ -1,6 +1,25 @@
 {% extends "base.html" %}
 
 {% block content %}
+<script>
+function copyText(text, el) {
+    // Fallback for non-HTTPS (navigator.clipboard requires secure context)
+    var textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+        document.execCommand('copy');
+        el.innerHTML = '&#10003;';
+        setTimeout(function() {
+            el.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+        }, 1000);
+    } catch(e) {}
+    document.body.removeChild(textarea);
+}
+</script>
 <style>
     .lot-matched { background: #f0fdf4; }
     .lot-matched td { border-bottom-color: #bbf7d0; }
@@ -121,7 +140,7 @@
         <div class="summary-item">
             <div class="label">Gain / Loss</div>
             <div class="value {% if is_gain %}gain{% else %}loss{% endif %}">
-                {% if is_gain %}+{% else %}-{% endif %}{{ gain_loss_fmt }}
+                {{ gain_loss_fmt }}
             </div>
         </div>
         <div class="summary-item">
@@ -146,7 +165,7 @@
     <div class="warning-box">
         No matching lots found. The opening position Account field must match the wallet address
         <strong>{{ wallet.address }}</strong>
-        <span class="copy-icon" onclick="navigator.clipboard.writeText('{{ wallet.address }}');this.textContent='✓';setTimeout(()=>this.textContent='📋',1000)" style="cursor:pointer;margin-left:4px;" title="Copy address">📋</span>
+        <span class="copy-icon" onclick="copyText('{{ wallet.address }}', this)" style="cursor:pointer;margin-left:4px;" title="Copy address"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></span>
         (case-insensitive). Update the Account values below.
     </div>
     {% endif %}
@@ -157,7 +176,7 @@
     <p style="color:#666; margin-bottom:12px;">
         {{ token_lots|length }} lots found. LIFO-highlighted lots match wallet
         <strong style="font-family:monospace;">{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}</strong>
-        <span class="copy-icon" onclick="navigator.clipboard.writeText('{{ wallet.address }}');this.textContent='✓';setTimeout(()=>this.textContent='📋',1000)" style="cursor:pointer;margin-left:4px;" title="Copy address">📋</span>.
+        <span class="copy-icon" onclick="copyText('{{ wallet.address }}', this)" style="cursor:pointer;margin-left:4px;" title="Copy address"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></span>.
         Edit the Account field to map legacy names to the wallet address.
     </p>
 
@@ -172,6 +191,7 @@
                     <th>Volume</th>
                     <th>Price</th>
                     <th>Cost Basis</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
@@ -206,6 +226,13 @@
                     <td>{{ '%.6f'|format(lot.volume) }}</td>
                     <td>${{ '%.2f'|format(lot.price) }}</td>
                     <td>${{ '%.2f'|format(lot.total) }}</td>
+                    <td>
+                        <form action="{{ url_for('delete_position') }}" method="post" style="display:inline;">
+                            <input type="hidden" name="lot_index" value="{{ lot.lot_index }}">
+                            <input type="hidden" name="redirect_url" value="{{ url_for('reconcile_detail', wallet_id=wallet.id, tx_index=tx_index) }}">
+                            <button type="submit" class="btn btn-sm btn-danger" style="padding:2px 6px; font-size:0.75em;" onclick="return confirm('Delete this lot?')">Del</button>
+                        </form>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -299,9 +326,15 @@
     <form action="{{ url_for('reconcile_confirm') }}" method="post">
         <input type="hidden" name="wallet_id" value="{{ wallet.id }}">
         <input type="hidden" name="tx_index" value="{{ tx_index }}">
-        <button type="submit" class="btn" {% if warning %}onclick="return confirm('There are unmatched lots. Confirm anyway?')"{% endif %}>
+        {% if warning %}
+        <button type="button" class="btn" onclick="document.getElementById('confirm-modal').style.display='flex'">
             Confirm Match
         </button>
+        {% else %}
+        <button type="submit" class="btn">
+            Confirm Match
+        </button>
+        {% endif %}
         <p style="color:#666; margin-top:8px; font-size:0.9em;">
             This will record the LIFO match: {{ cost_basis_fmt }} cost basis,
             {% if is_gain %}+{% else %}-{% endif %}{{ gain_loss_fmt }}
@@ -313,6 +346,18 @@
         Update the Account fields above to match the wallet address before confirming.
     </p>
     {% endif %}
+</div>
+{% endif %}
+{% if warning %}
+<div id="confirm-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:#fff; border-radius:8px; padding:24px; min-width:340px; max-width:480px; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+        <h3 style="margin:0 0 12px 0;">Confirm with Warning</h3>
+        <p style="color:#666; margin-bottom:16px;">There are unmatched lots. Are you sure you want to confirm this reconciliation?</p>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="document.getElementById('confirm-modal').style.display='none'">Cancel</button>
+            <button type="button" class="btn btn-sm" onclick="document.getElementById('confirm-modal').style.display='none'; document.querySelector('form[action*=reconcile\\/confirm]').submit();">Confirm</button>
+        </div>
+    </div>
 </div>
 {% endif %}
 {% endblock %}

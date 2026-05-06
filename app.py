@@ -42,6 +42,8 @@ def ensure_state():
         state['classifications'] = {}
     if 'known_addresses' not in state:
         state['known_addresses'] = []  # [{'label': 'Coinbase', 'addresses': ['0x...', '0x...']}]
+    if 'cost_basis_method' not in state:
+        state['cost_basis_method'] = 'LIFO'
     if 'price_cache' not in state:
         state['price_cache'] = {}
     return state
@@ -163,7 +165,9 @@ def parse_ledgers(tx):
                     if is_nft and token_name and token_name != currency:
                         display_token = token_name
                     if is_nft and token_id and f"#{token_id}" not in display_token:
-                        display_token = f"{display_token} #{token_id}"
+                        # Truncate very long token IDs
+                        tid = token_id if len(str(token_id)) <= 8 else str(token_id)[:6] + '...'
+                        display_token = f"{display_token} #{tid}"
 
                     contract_address = entry.get('contractAddress', '') or (tx_info.get('contractAddress', '') if tx_info else '')
 
@@ -672,10 +676,29 @@ def positions():
 
 @app.route('/reset', methods=['POST'])
 def reset():
-    """Remove state and allow re-upload."""
+    """Remove ALL state and allow re-upload."""
     if os.path.exists(app.config['DATA_FILE']):
         os.remove(app.config['DATA_FILE'])
     return redirect(url_for('index'))
+
+@app.route('/reupload-positions', methods=['POST'])
+def reupload_positions():
+    """Replace only opening positions, keeping wallets/transactions/classifications."""
+    if 'file' not in request.files:
+        return redirect(url_for('positions'))
+    file = request.files['file']
+    if file.filename == '' or not file.filename.endswith('.csv'):
+        return redirect(url_for('positions'))
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'opening_positions.csv')
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    file.save(filepath)
+    new_positions = parse_csv(filepath)
+    state = ensure_state()
+    state['positions'] = new_positions
+    state['filename'] = file.filename
+    state['reconciliations'] = {}
+    save_state(state)
+    return redirect(url_for('positions'))
 
 @app.route('/api/positions')
 def api_positions():
@@ -719,11 +742,34 @@ def count_unclassified_items(tx, tx_index, wallet_id, classifications, known_add
     # Single-token to known address is auto
     if len(non_fee) <= 1 and is_known_single_token(tx, known_addresses, addr_map):
         return 0
+
+    # Check for Payment/LP Deposit MINTs — received NFTs are auto-classified
+    is_payment_mint = False
+    is_lp_deposit_mint = False
+    if tx_type == 'MINT':
+        sent_items = [li for li in non_fee if li['direction'] == 'sent']
+        for si, _ in enumerate(sent_items):
+            ik = f"{wallet_id}_{tx_index}_{si}"
+            cl = classifications.get(ik, '')
+            if cl == 'Payment':
+                is_payment_mint = True
+            elif cl == 'LP Deposit':
+                is_lp_deposit_mint = True
+
     count = 0
     for item_idx, li in enumerate(non_fee):
         item_key = f"{wallet_id}_{tx_index}_{item_idx}"
-        if item_key not in classifications:
-            count += 1
+        if item_key in classifications:
+            continue
+        # Auto-classified items don't need review
+        if li.get('is_nft') and li['direction'] == 'received':
+            if is_lp_deposit_mint:
+                continue  # auto LP Position
+            if is_payment_mint:
+                sent_has_nft = any(s.get('is_nft') for s in tx.get('parsed_details', {}).get('sent', []))
+                if not sent_has_nft:
+                    continue  # auto Purchase
+        count += 1
     return count
 
 @app.route('/wallets')
@@ -773,6 +819,19 @@ def add_wallet():
     save_state(state)
     return redirect(url_for('wallets'))
 
+@app.route('/wallets/rename/<wallet_id>', methods=['POST'])
+def rename_wallet(wallet_id):
+    label = request.form.get('label', '').strip()
+    if not label:
+        return redirect(url_for('wallets'))
+    state = ensure_state()
+    for w in state['wallets']:
+        if w['id'] == wallet_id:
+            w['label'] = label
+            break
+    save_state(state)
+    return redirect(url_for('wallets'))
+
 @app.route('/wallets/remove/<wallet_id>', methods=['POST'])
 def remove_wallet(wallet_id):
     state = ensure_state()
@@ -800,6 +859,20 @@ def add_known_address():
             existing['addresses'].append(address)
     else:
         state['known_addresses'].append({'label': label, 'addresses': [address]})
+    save_state(state)
+    return redirect(url_for('wallets'))
+
+@app.route('/known-addresses/rename', methods=['POST'])
+def rename_known_address():
+    old_label = request.form.get('old_label', '').strip()
+    new_label = request.form.get('new_label', '').strip()
+    if not old_label or not new_label:
+        return redirect(url_for('wallets'))
+    state = ensure_state()
+    for ka in state['known_addresses']:
+        if ka['label'] == old_label:
+            ka['label'] = new_label
+            break
     save_state(state)
     return redirect(url_for('wallets'))
 
@@ -1340,8 +1413,8 @@ def build_2025_lots(state, wallet_id):
     return lots
 
 
-def lifo_match(positions, sold_token, sold_amount, wallet_address, lots_2025=None):
-    """LIFO match opening position lots and 2025 lots for a sold token.
+def lifo_match(positions, sold_token, sold_amount, wallet_address, lots_2025=None, method='LIFO'):
+    """Match opening position lots and 2025 lots for a sold token using LIFO or FIFO.
 
     Returns (matched_lots, remaining_amount, warning).
     matched_lots: [{'lot_index': int/str, 'volume_used': float, 'cost_basis': float,
@@ -1362,11 +1435,13 @@ def lifo_match(positions, sold_token, sold_amount, wallet_address, lots_2025=Non
                 continue
             if volume <= 0:
                 continue
+            # If price is 0 but total exists, compute effective price
+            effective_price = price if price > 0 else (total / volume if volume > 0 else 0)
             matching_lots.append({
                 'lot_index': i,
                 'date': p['date'],
                 'volume': volume,
-                'price': price,
+                'price': effective_price,
                 'total': total,
                 'source': 'opening',
             })
@@ -1386,8 +1461,8 @@ def lifo_match(positions, sold_token, sold_amount, wallet_address, lots_2025=Non
                 'source': lot['source'],
             })
 
-    # Sort by date descending (LIFO - most recent first)
-    matching_lots.sort(key=lambda x: x['date'], reverse=True)
+    # Sort by date: LIFO = newest first, FIFO = oldest first
+    matching_lots.sort(key=lambda x: x['date'], reverse=(method == 'LIFO'))
 
     matched = []
     remaining = sold_amount
@@ -1534,12 +1609,16 @@ def reconcile():
                         refund_usd = 0
                     proceeds = sent_usd - refund_usd
             else:
-                # Sold info
+                # Sold info — sum all sent items of the same token
                 sold_amount = ''
                 sold_token = ''
                 if sent:
-                    sold_amount = format_amount(sent[0].get('amount', ''))
                     sold_token = sent[0].get('token', '')
+                    try:
+                        total_sold = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
+                    except (ValueError, TypeError):
+                        total_sold = abs(float(sent[0].get('amount', 0)))
+                    sold_amount = format_amount(total_sold)
 
                 # Received info
                 recv_amount = ''
@@ -1566,12 +1645,13 @@ def reconcile():
             })
 
     # Sort by date descending
-    trades.sort(key=lambda x: x['date'], reverse=True)
+    trades.sort(key=lambda x: x['date'])
 
     matched_count = sum(1 for t in trades if t['status'] == 'Matched')
 
     return render_template('reconcile.html', trades=trades, matched_count=matched_count,
-                           total_count=len(trades), active_nav='reconcile')
+                           total_count=len(trades), cost_basis_method=state.get('cost_basis_method', 'LIFO'),
+                           active_nav='reconcile')
 
 
 @app.route('/reconcile/<wallet_id>/<int:tx_index>')
@@ -1622,16 +1702,14 @@ def reconcile_detail(wallet_id, tx_index):
         proceeds = sent_usd - refund_usd
     else:
         sold_token = sent[0].get('token', '') if sent else ''
-        sold_amount_raw = sent[0].get('amount', 0) if sent else 0
         try:
-            sold_amount = abs(float(sold_amount_raw))
+            sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token) if sent else 0
         except (ValueError, TypeError):
             sold_amount = 0
 
         recv_token = received[0].get('token', '') if received else ''
-        recv_amount_raw = received[0].get('amount', 0) if received else 0
         try:
-            recv_amount = abs(float(recv_amount_raw))
+            recv_amount = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == recv_token) if received else 0
         except (ValueError, TypeError):
             recv_amount = 0
 
@@ -1661,7 +1739,7 @@ def reconcile_detail(wallet_id, tx_index):
     token_2025_lots = [l for l in all_2025_lots if l['symbol'].upper() == sold_token.upper()]
 
     # LIFO matching (combined opening + 2025 lots)
-    matched_lots, remaining, warning = lifo_match(positions, sold_token, sold_amount, wallet['address'], lots_2025=all_2025_lots)
+    matched_lots, remaining, warning = lifo_match(positions, sold_token, sold_amount, wallet['address'], lots_2025=all_2025_lots, method=state.get('cost_basis_method', 'LIFO'))
     matched_indices = {m['lot_index'] for m in matched_lots}
 
     # Calculate cost basis and gain/loss from LIFO match
@@ -1715,7 +1793,7 @@ def reconcile_detail(wallet_id, tx_index):
                            total_cost_basis=total_cost_basis,
                            cost_basis_fmt=format_usd(total_cost_basis),
                            gain_loss=gain_loss,
-                           gain_loss_fmt=format_usd(abs(gain_loss)),
+                           gain_loss_fmt=f"{'-' if gain_loss < 0 else '+'}{format_usd(abs(gain_loss))}",
                            is_gain=gain_loss >= 0,
                            overall_term=overall_term,
                            warning=warning,
@@ -1723,6 +1801,95 @@ def reconcile_detail(wallet_id, tx_index):
                            existing_recon=existing_recon,
                            saved_lots_used=saved_lots_used,
                            active_nav='reconcile')
+
+
+@app.route('/reconcile/all', methods=['POST'])
+def reconcile_all():
+    """Auto-confirm all trades that have matching lots."""
+    state = ensure_state()
+    transactions = state.get('transactions', {})
+    positions = state.get('positions', [])
+    classifications = state.get('classifications', {})
+    reconciliations = state.get('reconciliations', {})
+    method = state.get('cost_basis_method', 'LIFO')
+    confirmed = 0
+
+    for wid, txs in transactions.items():
+        wallet = next((w for w in state['wallets'] if w['id'] == wid), None)
+        if not wallet:
+            continue
+        for i, tx in enumerate(txs):
+            recon_key = f"{wid}_{i}"
+            if recon_key in reconciliations:
+                continue  # already confirmed
+
+            tx_type = tx.get('type', '').upper()
+            details = tx.get('parsed_details', {})
+            sent = details.get('sent', [])
+            received = details.get('received', [])
+
+            # Check if this is a reconcilable transaction
+            if tx_type == 'TRADE':
+                sold_token = sent[0].get('token', '') if sent else ''
+                sold_amount_raw = sent[0].get('amount', 0) if sent else 0
+                try:
+                    sold_amount = abs(float(sold_amount_raw))
+                except (ValueError, TypeError):
+                    continue
+                proceeds = get_trade_proceeds(tx)
+            elif tx_type == 'MINT':
+                has_payment = any(classifications.get(f"{wid}_{i}_{idx}") in ('Payment', 'LP Deposit')
+                                  for idx, _ in enumerate(sent))
+                if not has_payment:
+                    continue
+                sold_token = sent[0].get('token', '') if sent else ''
+                try:
+                    total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
+                    total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
+                except (ValueError, TypeError):
+                    continue
+                sold_amount = total_sent - total_refund
+                try:
+                    sent_usd = sum(abs(float(s.get('usd_value', '0').replace('$','').replace(',',''))) for s in sent if s.get('token') == sold_token)
+                    refund_usd = sum(abs(float(r.get('usd_value', '0').replace('$','').replace(',',''))) for r in received if r.get('token') == sold_token)
+                except (ValueError, TypeError):
+                    continue
+                proceeds = sent_usd - refund_usd
+            else:
+                continue
+
+            if sold_amount <= 0:
+                continue
+
+            # Build 2025 lots and run LIFO/FIFO matching
+            all_2025_lots = build_2025_lots(state, wid)
+            matched_lots, remaining, warning = lifo_match(positions, sold_token, sold_amount,
+                                                           wallet['address'], lots_2025=all_2025_lots, method=method)
+
+            if matched_lots and remaining < 0.000001:
+                # Full match — auto-confirm
+                total_cost_basis = sum(m['cost_basis'] for m in matched_lots)
+                gain_loss = proceeds - total_cost_basis
+                terms = [determine_term(m['date_acquired'], tx.get('date', '')) for m in matched_lots]
+                if all(t == 'long' for t in terms):
+                    overall_term = 'long'
+                elif all(t == 'short' for t in terms):
+                    overall_term = 'short'
+                else:
+                    overall_term = 'mixed'
+
+                reconciliations[recon_key] = {
+                    'lots_used': matched_lots,
+                    'proceeds': proceeds,
+                    'gain_loss': gain_loss,
+                    'term': overall_term,
+                    'status': 'matched',
+                }
+                confirmed += 1
+
+    state['reconciliations'] = reconciliations
+    save_state(state)
+    return redirect(url_for('reconcile'))
 
 
 @app.route('/reconcile/confirm', methods=['POST'])
@@ -1778,7 +1945,7 @@ def reconcile_confirm():
 
     # Build 2025 lots and run LIFO matching
     all_2025_lots = build_2025_lots(state, wallet_id)
-    matched_lots, remaining, warning = lifo_match(positions, sold_token, sold_amount, wallet['address'], lots_2025=all_2025_lots)
+    matched_lots, remaining, warning = lifo_match(positions, sold_token, sold_amount, wallet['address'], lots_2025=all_2025_lots, method=state.get('cost_basis_method', 'LIFO'))
 
     total_cost_basis = sum(m['cost_basis'] for m in matched_lots)
     gain_loss = proceeds - total_cost_basis
@@ -1869,6 +2036,167 @@ def update_position_account():
 
     return redirect(redirect_url or url_for('positions'))
 
+
+@app.route('/positions/delete', methods=['POST'])
+def delete_position():
+    lot_index = request.form.get('lot_index', '')
+    redirect_url = request.form.get('redirect_url', '')
+
+    try:
+        lot_index = int(lot_index)
+    except (ValueError, TypeError):
+        return redirect(redirect_url or url_for('positions'))
+
+    state = ensure_state()
+    positions = state.get('positions', [])
+    if 0 <= lot_index < len(positions):
+        # Only clear reconciliations that used this specific lot
+        if 'reconciliations' in state:
+            to_remove = []
+            for key, recon in state['reconciliations'].items():
+                for lot in recon.get('lots_used', []):
+                    if lot.get('lot_index') == lot_index:
+                        to_remove.append(key)
+                        break
+            for key in to_remove:
+                del state['reconciliations'][key]
+            # Update lot indices in remaining reconciliations (shift down by 1 for lots above deleted index)
+            for key, recon in state['reconciliations'].items():
+                for lot in recon.get('lots_used', []):
+                    if isinstance(lot.get('lot_index'), int) and lot['lot_index'] > lot_index:
+                        lot['lot_index'] -= 1
+        positions.pop(lot_index)
+        state['positions'] = positions
+        save_state(state)
+
+    return redirect(redirect_url or url_for('positions'))
+
+
+@app.route('/positions/update-field', methods=['POST'])
+def update_position_field():
+    """AJAX endpoint: update a single field on a position lot."""
+    data = request.get_json(force=True)
+    lot_index = data.get('lot_index')
+    field = data.get('field', '')
+    value = data.get('value', '')
+
+    if field not in ('account', 'volume', 'price'):
+        return jsonify({'error': 'Invalid field'}), 400
+
+    try:
+        lot_index = int(lot_index)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid lot_index'}), 400
+
+    state = ensure_state()
+    positions = state.get('positions', [])
+    if not (0 <= lot_index < len(positions)):
+        return jsonify({'error': 'Lot index out of range'}), 400
+
+    positions[lot_index][field] = value
+
+    # Recalculate total if volume or price changed
+    if field in ('volume', 'price'):
+        try:
+            vol = float(positions[lot_index].get('volume', 0) or 0)
+            prc = float(positions[lot_index].get('price', 0) or 0)
+            positions[lot_index]['total'] = str(round(vol * prc, 10))
+        except (ValueError, TypeError):
+            pass
+
+    # Clear affected reconciliations
+    if 'reconciliations' in state:
+        to_remove = []
+        for key, recon in state['reconciliations'].items():
+            for lot in recon.get('lots_used', []):
+                if lot.get('lot_index') == lot_index:
+                    to_remove.append(key)
+                    break
+        for key in to_remove:
+            del state['reconciliations'][key]
+
+    save_state(state)
+    return jsonify({'ok': True, 'lot': positions[lot_index]})
+
+
+@app.route('/positions/add', methods=['POST'])
+def add_position():
+    """AJAX endpoint: add a new opening position lot."""
+    data = request.get_json(force=True)
+    date = data.get('date', '').strip()
+    symbol = data.get('symbol', '').strip()
+    account = data.get('account', '').strip()
+    volume = data.get('volume', '').strip()
+    price = data.get('price', '').strip()
+
+    if not symbol:
+        return jsonify({'error': 'Symbol is required'}), 400
+
+    try:
+        vol = float(volume) if volume else 0
+        prc = float(price) if price else 0
+        total = str(round(vol * prc, 10))
+    except (ValueError, TypeError):
+        total = ''
+
+    lot = {
+        'date': date,
+        'symbol': symbol.upper(),
+        'account': account,
+        'volume': volume,
+        'price': price,
+        'currency': 'USD',
+        'fee': '',
+        'fee_currency': '',
+        'total': total,
+        'memo': '',
+    }
+
+    state = ensure_state()
+    if 'positions' not in state:
+        state['positions'] = []
+    state['positions'].append(lot)
+    save_state(state)
+
+    return jsonify({'ok': True, 'lot': lot, 'lot_index': len(state['positions']) - 1})
+
+
+@app.route('/positions/delete-ajax', methods=['POST'])
+def delete_position_ajax():
+    """AJAX endpoint: delete a position lot and return JSON."""
+    data = request.get_json(force=True)
+    lot_index = data.get('lot_index')
+
+    try:
+        lot_index = int(lot_index)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid lot_index'}), 400
+
+    state = ensure_state()
+    positions = state.get('positions', [])
+    if not (0 <= lot_index < len(positions)):
+        return jsonify({'error': 'Lot index out of range'}), 400
+
+    # Clear affected reconciliations
+    if 'reconciliations' in state:
+        to_remove = []
+        for key, recon in state['reconciliations'].items():
+            for lot in recon.get('lots_used', []):
+                if lot.get('lot_index') == lot_index:
+                    to_remove.append(key)
+                    break
+        for key in to_remove:
+            del state['reconciliations'][key]
+        for key, recon in state['reconciliations'].items():
+            for lot in recon.get('lots_used', []):
+                if isinstance(lot.get('lot_index'), int) and lot['lot_index'] > lot_index:
+                    lot['lot_index'] -= 1
+
+    positions.pop(lot_index)
+    state['positions'] = positions
+    save_state(state)
+
+    return jsonify({'ok': True})
 
 
 # ============ REPORTS (Phase 4) ============
@@ -2010,6 +2338,16 @@ def build_income_rows(state):
     rows.sort(key=lambda x: x.get('sort_date', ''))
     return rows
 
+
+@app.route('/settings/cost-basis-method', methods=['POST'])
+def set_cost_basis_method():
+    method = request.form.get('method', 'LIFO')
+    if method not in ('LIFO', 'FIFO'):
+        method = 'LIFO'
+    state = ensure_state()
+    state['cost_basis_method'] = method
+    save_state(state)
+    return redirect(url_for('reconcile'))
 
 @app.route('/reports')
 def reports():

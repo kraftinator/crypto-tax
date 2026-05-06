@@ -42,7 +42,11 @@
         <tbody>
             {% for w in wallets %}
             <tr>
-                <td><strong>{{ w.label }}</strong></td>
+                <td>
+                    <form action="{{ url_for('rename_wallet', wallet_id=w.id) }}" method="post" style="display:inline;">
+                        <input type="text" name="label" value="{{ w.label }}" style="font-weight:600; border:1px solid transparent; padding:2px 4px; border-radius:4px; width:140px; background:transparent;" onfocus="this.style.borderColor='#ddd';this.style.background='#fff'" onblur="this.style.borderColor='transparent';this.style.background='transparent'; if(this.value !== '{{ w.label }}') this.form.submit();">
+                    </form>
+                </td>
                 <td style="font-family:monospace; font-size:0.85em;">{{ w.address[:8] }}...{{ w.address[-6:] }}</td>
                 <td>
                     {% set status = wallet_status.get(w.id, {'total': 0, 'needs_review': 0}) %}
@@ -100,7 +104,12 @@
             {% for ka in known_addresses %}
             {% for addr in ka.addresses %}
             <tr>
-                <td><strong>{{ ka.label }}</strong></td>
+                <td>
+                    <form action="{{ url_for('rename_known_address') }}" method="post" style="display:inline;">
+                        <input type="hidden" name="old_label" value="{{ ka.label }}">
+                        <input type="text" name="new_label" value="{{ ka.label }}" size="{{ ka.label|length + 2 }}" style="font-weight:600; border:1px solid transparent; padding:2px 4px; border-radius:4px; background:transparent;" onfocus="this.style.borderColor='#ddd';this.style.background='#fff'" onblur="this.style.borderColor='transparent';this.style.background='transparent'; if(this.value !== '{{ ka.label }}') this.form.submit();">
+                    </form>
+                </td>
                 <td style="font-family:monospace; font-size:0.85em;">{{ addr[:8] }}...{{ addr[-6:] }}</td>
                 <td>
                     <form action="{{ url_for('remove_known_address') }}" method="post" style="display:inline;">

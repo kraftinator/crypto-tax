@@ -1,6 +1,65 @@
 {% extends "base.html" %}
 
 {% block content %}
+<style>
+    .inline-edit {
+        background: transparent;
+        border: 1px solid transparent;
+        font: inherit;
+        color: inherit;
+        padding: 2px 4px;
+        width: 100%;
+        box-sizing: border-box;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+    .inline-edit:focus {
+        border-color: #ccc;
+        background: #fff;
+    }
+    .inline-edit.save-ok {
+        border-color: #16a34a !important;
+    }
+    .add-lot-row td {
+        padding: 4px 6px !important;
+    }
+    .add-lot-row input {
+        font: inherit;
+        padding: 3px 6px;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        width: 100%;
+        box-sizing: border-box;
+    }
+    .add-lot-row input:focus {
+        border-color: #2563eb;
+        outline: none;
+    }
+    .btn-del {
+        background: none;
+        border: none;
+        color: #999;
+        cursor: pointer;
+        font-size: 12px;
+        padding: 2px 6px;
+    }
+    .btn-del:hover {
+        color: #dc2626;
+    }
+    .btn-add {
+        background: #2563eb;
+        color: #fff;
+        border: none;
+        padding: 4px 12px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 13px;
+    }
+    .btn-add:hover {
+        background: #1d4ed8;
+    }
+</style>
+
 <div class="stats">
     <div class="stat-box">
         <div class="label">Total Lots</div>
@@ -19,8 +78,9 @@
         </div>
         <div>
             <span id="rowCount" style="margin-right: 12px; color: #666;"></span>
-            <form action="{{ url_for('reset') }}" method="post" style="display:inline;">
-                <button type="submit" class="btn btn-danger" onclick="return confirm('Remove all data and start over?')">Reset</button>
+            <form action="{{ url_for('reupload_positions') }}" method="post" enctype="multipart/form-data" style="display:inline;">
+                <input type="file" name="file" accept=".csv" required style="font-size:0.85em; width:200px;">
+                <button type="submit" class="btn btn-sm" onclick="return confirm('Replace opening positions? Wallets and transactions will be kept.')">Re-upload</button>
             </form>
         </div>
     </div>
@@ -38,20 +98,34 @@
                     <th data-col="fee">Fee</th>
                     <th data-col="total">Total</th>
                     <th data-col="memo">Memo</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
+                <tr class="add-lot-row" id="addLotRow">
+                    <td><input type="text" id="addDate" placeholder="MM/DD/YYYY"></td>
+                    <td><input type="text" id="addSymbol" placeholder="BTC"></td>
+                    <td><input type="text" id="addAccount" placeholder="Account"></td>
+                    <td><input type="text" id="addVolume" placeholder="0" class="add-calc"></td>
+                    <td><input type="text" id="addPrice" placeholder="0.00" class="add-calc"></td>
+                    <td>USD</td>
+                    <td></td>
+                    <td id="addTotal">-</td>
+                    <td></td>
+                    <td><button class="btn-add" id="addLotBtn">Add</button></td>
+                </tr>
                 {% for p in positions %}
-                <tr data-symbol="{{ p.symbol|lower }}">
+                <tr data-symbol="{{ p.symbol|lower }}" data-index="{{ loop.index0 }}">
                     <td>{{ p.date }}</td>
                     <td><strong>{{ p.symbol }}</strong></td>
-                    <td>{{ p.account }}</td>
-                    <td>{{ p.volume }}</td>
-                    <td>{{ p.price }}</td>
+                    <td><input class="inline-edit" data-field="account" value="{{ p.account }}"></td>
+                    <td><input class="inline-edit" data-field="volume" value="{{ p.volume }}"></td>
+                    <td><input class="inline-edit" data-field="price" value="{{ p.price }}"></td>
                     <td>{{ p.currency }}</td>
                     <td>{{ p.fee }}</td>
-                    <td>{{ p.total }}</td>
+                    <td class="lot-total">{{ p.total }}</td>
                     <td>{{ p.memo }}</td>
+                    <td><button class="btn-del" title="Delete lot">&times;</button></td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -63,20 +137,27 @@
 {% block scripts %}
 <script>
 (function() {
-    const filter = document.getElementById('symbolFilter');
-    const table = document.getElementById('positionsTable');
-    const rows = table.querySelectorAll('tbody tr');
-    const rowCount = document.getElementById('rowCount');
+    var filter = document.getElementById('symbolFilter');
+    var table = document.getElementById('positionsTable');
+    var rowCount = document.getElementById('rowCount');
+
+    function getDataRows() {
+        return table.querySelectorAll('tbody tr[data-index]');
+    }
 
     function updateCount() {
-        const visible = table.querySelectorAll('tbody tr:not([style*="display: none"])').length;
+        var rows = getDataRows();
+        var visible = 0;
+        rows.forEach(function(r) {
+            if (r.style.display !== 'none') visible++;
+        });
         rowCount.textContent = visible + ' of ' + rows.length + ' lots';
     }
 
     filter.addEventListener('input', function() {
-        const val = this.value.toLowerCase().trim();
-        rows.forEach(function(row) {
-            const symbol = row.getAttribute('data-symbol');
+        var val = this.value.toLowerCase().trim();
+        getDataRows().forEach(function(row) {
+            var symbol = row.getAttribute('data-symbol');
             if (!val || symbol.indexOf(val) !== -1) {
                 row.style.display = '';
             } else {
@@ -87,38 +168,166 @@
     });
 
     // Column sorting
-    let sortCol = null;
-    let sortAsc = true;
+    var sortCol = null;
+    var sortAsc = true;
 
     table.querySelectorAll('th').forEach(function(th) {
         th.addEventListener('click', function() {
-            const col = this.getAttribute('data-col');
+            var col = this.getAttribute('data-col');
+            if (!col) return;
             if (sortCol === col) {
                 sortAsc = !sortAsc;
             } else {
                 sortCol = col;
                 sortAsc = true;
             }
-            const colIndex = Array.from(this.parentNode.children).indexOf(this);
-            const rowsArr = Array.from(rows);
+            var colIndex = Array.from(this.parentNode.children).indexOf(this);
+            var rowsArr = Array.from(getDataRows());
             rowsArr.sort(function(a, b) {
-                let aVal = a.children[colIndex].textContent.trim();
-                let bVal = b.children[colIndex].textContent.trim();
-                // Try numeric
-                let aNum = parseFloat(aVal);
-                let bNum = parseFloat(bVal);
+                var aCell = a.children[colIndex];
+                var bCell = b.children[colIndex];
+                var aVal = aCell.querySelector('.inline-edit') ? aCell.querySelector('.inline-edit').value : aCell.textContent.trim();
+                var bVal = bCell.querySelector('.inline-edit') ? bCell.querySelector('.inline-edit').value : bCell.textContent.trim();
+                var aNum = parseFloat(aVal);
+                var bNum = parseFloat(bVal);
                 if (!isNaN(aNum) && !isNaN(bNum)) {
                     return sortAsc ? aNum - bNum : bNum - aNum;
                 }
                 return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
             });
-            const tbody = table.querySelector('tbody');
+            var tbody = table.querySelector('tbody');
             rowsArr.forEach(function(row) { tbody.appendChild(row); });
             updateCount();
         });
     });
 
     updateCount();
+
+    // Inline editing - save on blur
+    function flashSuccess(el) {
+        el.classList.add('save-ok');
+        setTimeout(function() { el.classList.remove('save-ok'); }, 1000);
+    }
+
+    table.addEventListener('blur', function(e) {
+        var input = e.target;
+        if (!input.classList.contains('inline-edit')) return;
+        var row = input.closest('tr');
+        var lotIndex = parseInt(row.getAttribute('data-index'));
+        var field = input.getAttribute('data-field');
+        var value = input.value;
+
+        fetch('/positions/update-field', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({lot_index: lotIndex, field: field, value: value})
+        }).then(function(resp) {
+            return resp.json();
+        }).then(function(data) {
+            if (data.ok) {
+                flashSuccess(input);
+                // Update total cell
+                if (field === 'volume' || field === 'price') {
+                    var totalCell = row.querySelector('.lot-total');
+                    if (totalCell && data.lot) {
+                        totalCell.textContent = data.lot.total;
+                    }
+                }
+            }
+        });
+    }, true);
+
+    // Delete lot
+    table.addEventListener('click', function(e) {
+        var btn = e.target.closest('.btn-del');
+        if (!btn) return;
+        var row = btn.closest('tr');
+        var lotIndex = parseInt(row.getAttribute('data-index'));
+        if (!confirm('Delete this lot?')) return;
+
+        fetch('/positions/delete-ajax', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({lot_index: lotIndex})
+        }).then(function(resp) {
+            return resp.json();
+        }).then(function(data) {
+            if (data.ok) {
+                row.remove();
+                // Re-index remaining rows
+                var rows = getDataRows();
+                var idx = 0;
+                rows.forEach(function(r) {
+                    r.setAttribute('data-index', idx);
+                    idx++;
+                });
+                updateCount();
+            }
+        });
+    });
+
+    // Add lot - auto-calculate total
+    var addVolume = document.getElementById('addVolume');
+    var addPrice = document.getElementById('addPrice');
+    var addTotal = document.getElementById('addTotal');
+
+    function calcAddTotal() {
+        var v = parseFloat(addVolume.value) || 0;
+        var p = parseFloat(addPrice.value) || 0;
+        addTotal.textContent = v && p ? (v * p).toFixed(2) : '-';
+    }
+    addVolume.addEventListener('input', calcAddTotal);
+    addPrice.addEventListener('input', calcAddTotal);
+
+    // Add lot - submit
+    document.getElementById('addLotBtn').addEventListener('click', function() {
+        var date = document.getElementById('addDate').value.trim();
+        var symbol = document.getElementById('addSymbol').value.trim();
+        var account = document.getElementById('addAccount').value.trim();
+        var volume = addVolume.value.trim();
+        var price = addPrice.value.trim();
+
+        if (!symbol) {
+            document.getElementById('addSymbol').focus();
+            return;
+        }
+
+        fetch('/positions/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({date: date, symbol: symbol, account: account, volume: volume, price: price})
+        }).then(function(resp) {
+            return resp.json();
+        }).then(function(data) {
+            if (data.ok) {
+                var lot = data.lot;
+                var newRow = document.createElement('tr');
+                newRow.setAttribute('data-symbol', lot.symbol.toLowerCase());
+                newRow.setAttribute('data-index', data.lot_index);
+                newRow.innerHTML =
+                    '<td>' + (lot.date || '') + '</td>' +
+                    '<td><strong>' + lot.symbol + '</strong></td>' +
+                    '<td><input class="inline-edit" data-field="account" value="' + (lot.account || '') + '"></td>' +
+                    '<td><input class="inline-edit" data-field="volume" value="' + (lot.volume || '') + '"></td>' +
+                    '<td><input class="inline-edit" data-field="price" value="' + (lot.price || '') + '"></td>' +
+                    '<td>' + (lot.currency || '') + '</td>' +
+                    '<td>' + (lot.fee || '') + '</td>' +
+                    '<td class="lot-total">' + (lot.total || '') + '</td>' +
+                    '<td>' + (lot.memo || '') + '</td>' +
+                    '<td><button class="btn-del" title="Delete lot">&times;</button></td>';
+                table.querySelector('tbody').appendChild(newRow);
+
+                // Clear the add form
+                document.getElementById('addDate').value = '';
+                document.getElementById('addSymbol').value = '';
+                document.getElementById('addAccount').value = '';
+                addVolume.value = '';
+                addPrice.value = '';
+                addTotal.textContent = '-';
+                updateCount();
+            }
+        });
+    });
 })();
 </script>
 {% endblock %}
