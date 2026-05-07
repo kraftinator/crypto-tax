@@ -3,10 +3,13 @@ import io
 import csv
 import json
 import time
+import threading
 import requests
 import pdfrw
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
+
+_state_lock = threading.RLock()
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -22,10 +25,13 @@ def load_state():
     return None
 
 def save_state(data):
-    """Save state to state.json."""
-    os.makedirs(os.path.dirname(app.config['DATA_FILE']), exist_ok=True)
-    with open(app.config['DATA_FILE'], 'w') as f:
+    """Save state atomically: write to a temp file then rename."""
+    path = app.config['DATA_FILE']
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    with open(tmp, 'w') as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, path)
 
 @app.route('/backup', methods=['POST'])
 def backup():
@@ -828,7 +834,7 @@ def wallets():
         }
 
     return render_template('wallets.html', wallets=wallet_list, wallet_status=wallet_status,
-                           known_addresses=state.get('known_addresses', []),
+                           known_addresses=sorted(state.get('known_addresses', []), key=lambda ka: ka.get('label', '').lower()),
                            active_nav='wallets')
 
 @app.route('/wallets/add', methods=['POST'])
@@ -1369,6 +1375,13 @@ def wallet_detail(wallet_id):
         # For single-token rows, pull classification info from item 0
         single_item = non_fee_items[0] if non_fee_items else None
 
+        single_show_dropdown = single_item.get('show_dropdown', False) if single_item else False
+        single_classification = single_item.get('classification', '') if single_item else ''
+        if is_multi:
+            is_needs_review = needs_classification and classification_summary not in ('All classified', 'Trade')
+        else:
+            is_needs_review = single_show_dropdown and not single_classification
+
         display_txs.append({
             'index': i,
             'date': format_date(tx.get('date', '')),
@@ -1385,16 +1398,32 @@ def wallet_detail(wallet_id):
             'is_multi': is_multi,
             'is_trade': is_trade,
             'classification_summary': classification_summary,
+            'is_needs_review': is_needs_review,
             # Single-token row classification
             'single_item_key': single_item.get('item_key', '') if single_item else '',
-            'single_classification': single_item.get('classification', '') if single_item else '',
-            'single_show_dropdown': single_item.get('show_dropdown', False) if single_item else False,
+            'single_classification': single_classification,
+            'single_show_dropdown': single_show_dropdown,
             'single_auto_label': single_item.get('auto_label', '') if single_item else '',
         })
 
+    show_all = request.args.get('show_all') == '1'
+    search_q = request.args.get('q', '').strip()
+    total_count = len(display_txs)
+    if search_q:
+        ql = search_q.lower()
+        def matches(tx):
+            if ql in (tx.get('details') or '').lower(): return True
+            if ql in (tx.get('type') or '').lower(): return True
+            for li in tx.get('line_items', []):
+                if ql in (li.get('token') or '').lower(): return True
+            return False
+        display_txs = [tx for tx in display_txs if matches(tx)]
+    elif not show_all:
+        display_txs = [tx for tx in display_txs if tx.get('is_needs_review')]
     return render_template('wallet_detail.html', wallet=wallet, transactions=display_txs,
-                           needs_review_count=needs_review_count, total_count=len(display_txs),
-                           active_nav='wallets')
+                           needs_review_count=needs_review_count, total_count=total_count,
+                           shown_count=len(display_txs), show_all=show_all,
+                           search_q=search_q, active_nav='wallets')
 
 @app.route('/wallets/classify', methods=['POST'])
 def classify_transaction():
@@ -1410,12 +1439,13 @@ def classify_transaction():
         if request.is_json:
             return jsonify({'status': 'error', 'message': 'No tx_key'}), 400
         return redirect(url_for('wallets'))
-    state = ensure_state()
-    if classification:
-        state['classifications'][tx_key] = classification
-    else:
-        state['classifications'].pop(tx_key, None)
-    save_state(state)
+    with _state_lock:
+        state = ensure_state()
+        if classification:
+            state['classifications'][tx_key] = classification
+        else:
+            state['classifications'].pop(tx_key, None)
+        save_state(state)
     if request.is_json:
         return jsonify({'status': 'ok', 'tx_key': tx_key, 'classification': classification})
     # Redirect back to the wallet detail page
@@ -1613,7 +1643,7 @@ def _consume_from_pool(pool_lots, symbol, amount, method):
 
     consumed = []
     remaining = amount
-    dust_tolerance = max(0.001, amount * 0.0000001)
+    dust_tolerance = max(1e-9, amount * 0.0000001)
     indices_to_remove = []
 
     for idx, lot in matching:
@@ -1929,7 +1959,7 @@ def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', cons
 
     matched = []
     remaining = sold_amount
-    dust_tolerance = max(0.001, sold_amount * 0.0000001)
+    dust_tolerance = max(1e-9, sold_amount * 0.0000001)
     indices_to_remove = []
 
     for idx, lot in matching:
@@ -2768,13 +2798,28 @@ def delete_position_ajax():
 
 # ============ REPORTS (Phase 4) ============
 
+_DATE_FORMATS = ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S',
+                 '%Y-%m-%d %H:%M:%S %z', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
+                 '%b-%d-%Y %H:%M', '%b-%d-%Y')
+
+def parse_date_to_dt(date_str):
+    """Parse any known date string format into a datetime; returns datetime.min on failure."""
+    if not date_str:
+        return datetime.min
+    date_str = date_str.strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(date_str, fmt).replace(tzinfo=None)
+        except ValueError:
+            continue
+    return datetime.min
+
 def format_date_mmddyyyy(date_str):
     """Convert various date formats to MM/DD/YYYY."""
     if not date_str:
         return ''
     date_str = date_str.strip()
-    for fmt in ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S',
-                '%Y-%m-%d %H:%M:%S %z', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+    for fmt in _DATE_FORMATS:
         try:
             dt = datetime.strptime(date_str, fmt)
             return dt.strftime('%m/%d/%Y')
@@ -2814,7 +2859,7 @@ def build_form8949_rows(state):
             # Single lot - one row
             lot = lots_used[0]
             rows.append({
-                'description': f"{lot['volume_used']:.8g} {sold_token}",
+                'description': f"{lot['volume_used']:,.8f}".rstrip('0').rstrip('.') + f" {sold_token}",
                 'date_acquired': format_date_mmddyyyy(lot['date_acquired']),
                 'date_sold': format_date_mmddyyyy(date_sold),
                 'proceeds': round(total_proceeds, 2),
@@ -2834,7 +2879,7 @@ def build_form8949_rows(state):
                     lot_proceeds = 0
                 lot_gain_loss = lot_proceeds - lot['cost_basis']
                 rows.append({
-                    'description': f"{lot['volume_used']:.8g} {sold_token}",
+                    'description': f"{lot['volume_used']:,.8f}".rstrip('0').rstrip('.') + f" {sold_token}",
                     'date_acquired': format_date_mmddyyyy(lot['date_acquired']),
                     'date_sold': format_date_mmddyyyy(date_sold),
                     'proceeds': round(lot_proceeds, 2),
@@ -2845,7 +2890,7 @@ def build_form8949_rows(state):
                 })
 
     # Sort by date sold
-    rows.sort(key=lambda x: x.get('sort_date', ''))
+    rows.sort(key=lambda x: parse_date_to_dt(x.get('sort_date', '')))
     return rows
 
 
@@ -2902,7 +2947,7 @@ def build_income_rows(state):
             'sort_date': tx.get('date', ''),
         })
 
-    rows.sort(key=lambda x: x.get('sort_date', ''))
+    rows.sort(key=lambda x: parse_date_to_dt(x.get('sort_date', '')))
     return rows
 
 
@@ -3008,7 +3053,7 @@ def _run_reconcile_all(state):
         matched_lots, remaining, warning = lifo_match_from_pool(
             wallet_pool, trade['sold_token'], trade['sold_amount'], method=method, consume=True)
 
-        dust_tol = max(0.001, trade['sold_amount'] * 0.0000001)
+        dust_tol = max(1e-9, trade['sold_amount'] * 0.0000001)
         if matched_lots and remaining < dust_tol:
             total_cost_basis = sum(m['cost_basis'] for m in matched_lots)
             gain_loss = trade['proceeds'] - total_cost_basis

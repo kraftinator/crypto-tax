@@ -125,7 +125,7 @@
                 <tr>
                     <td>{{ r.date }}</td>
                     <td>{{ r.token }}</td>
-                    <td style="text-align:right;">{{ r.amount }}</td>
+                    <td style="text-align:right;">{{ "{:,.8f}".format(r.amount).rstrip('0').rstrip('.') }}</td>
                     <td style="text-align:right;">${{ "{:,.2f}".format(r.fmv_usd) }}</td>
                     <td>
                         {% if r.type == 'Airdrop' %}

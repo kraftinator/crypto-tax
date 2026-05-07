@@ -47,7 +47,12 @@
                         <input type="text" name="label" value="{{ w.label }}" style="font-weight:600; border:1px solid transparent; padding:2px 4px; border-radius:4px; width:140px; background:transparent;" onfocus="this.style.borderColor='#ddd';this.style.background='#fff'" onblur="this.style.borderColor='transparent';this.style.background='transparent'; if(this.value !== '{{ w.label }}') this.form.submit();">
                     </form>
                 </td>
-                <td style="font-family:monospace; font-size:0.85em;">{{ w.address[:8] }}...{{ w.address[-6:] }}</td>
+                <td style="font-family:monospace; font-size:0.85em;">
+                    <span>{{ w.address[:8] }}...{{ w.address[-6:] }}</span>
+                    <button type="button" title="Copy address" onclick="copyWalletAddress('{{ w.address }}', this)" style="background:none; border:none; cursor:pointer; padding:2px 4px; vertical-align:middle; color:#666;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    </button>
+                </td>
                 <td>
                     {% set status = wallet_status.get(w.id, {'total': 0, 'needs_review': 0}) %}
                     {{ status.total }} txns
@@ -110,7 +115,12 @@
                         <input type="text" name="new_label" value="{{ ka.label }}" size="{{ ka.label|length + 2 }}" style="font-weight:600; border:1px solid transparent; padding:2px 4px; border-radius:4px; background:transparent;" onfocus="this.style.borderColor='#ddd';this.style.background='#fff'" onblur="this.style.borderColor='transparent';this.style.background='transparent'; if(this.value !== '{{ ka.label }}') this.form.submit();">
                     </form>
                 </td>
-                <td style="font-family:monospace; font-size:0.85em;">{{ addr[:8] }}...{{ addr[-6:] }}</td>
+                <td style="font-family:monospace; font-size:0.85em;">
+                    <span>{{ addr[:8] }}...{{ addr[-6:] }}</span>
+                    <button type="button" title="Copy address" onclick="copyWalletAddress('{{ addr }}', this)" style="background:none; border:none; cursor:pointer; padding:2px 4px; vertical-align:middle; color:#666;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    </button>
+                </td>
                 <td>
                     <form action="{{ url_for('remove_known_address') }}" method="post" style="display:inline;">
                         <input type="hidden" name="label" value="{{ ka.label }}">
@@ -127,4 +137,27 @@
     <p style="color:#888;">No known addresses yet.</p>
     {% endif %}
 </div>
+
+<script>
+function copyWalletAddress(addr, btn) {
+    function flash() {
+        var original = btn.innerHTML;
+        btn.innerHTML = '<span style="color:#16a34a; font-size:0.8em; font-family:sans-serif;">Copied</span>';
+        setTimeout(function() { btn.innerHTML = original; }, 1200);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(addr).then(flash);
+        return;
+    }
+    var ta = document.createElement('textarea');
+    ta.value = addr;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); flash(); } catch (e) { alert('Copy failed: ' + addr); }
+    document.body.removeChild(ta);
+}
+</script>
 {% endblock %}

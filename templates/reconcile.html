@@ -98,9 +98,16 @@
     var countEl = document.getElementById('reconCount');
     if (!table) return;
 
+    var savedWallet = sessionStorage.getItem('reconFilterWallet');
+    var savedStatus = sessionStorage.getItem('reconFilterStatus');
+    if (savedWallet !== null) filterWallet.value = savedWallet;
+    if (savedStatus !== null) filterStatus.value = savedStatus;
+
     function applyFilters() {
         var wallet = filterWallet.value;
         var status = filterStatus.value;
+        sessionStorage.setItem('reconFilterWallet', wallet);
+        sessionStorage.setItem('reconFilterStatus', status);
         var rows = table.querySelectorAll('tbody tr');
         var visible = 0;
         rows.forEach(function(row) {

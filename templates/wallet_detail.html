@@ -104,16 +104,30 @@
         </form>
     </div>
 
-    {% if transactions %}
     <div class="toolbar">
         <div class="filter-bar">
-            <input type="text" id="txFilter" placeholder="Filter by type or details..." style="width:300px;">
-            <label style="margin-left:12px; font-size:0.9em;">
-                <input type="checkbox" id="showNeedsReview"> Show only needs review
-            </label>
+            <form method="get" action="{{ url_for('wallet_detail', wallet_id=wallet.id) }}" style="display:inline;">
+                <input type="text" id="txFilter" name="q" value="{{ search_q or '' }}" placeholder="Filter by type, details, or token..." style="width:300px;">
+                <button type="submit" class="btn btn-sm" style="margin-left:6px;">Search all</button>
+            </form>
+            <span style="margin-left:16px; font-size:0.9em; color:#666;">
+                {% if search_q %}
+                    Showing {{ shown_count }} of {{ total_count }} matching "{{ search_q }}".
+                    <a href="{{ url_for('wallet_detail', wallet_id=wallet.id) }}" style="margin-left:8px;">Clear</a>
+                {% elif show_all %}
+                    Showing all {{ total_count }} transactions.
+                    <a href="{{ url_for('wallet_detail', wallet_id=wallet.id) }}" style="margin-left:8px;">Show only needs review</a>
+                {% else %}
+                    Showing {{ shown_count }} of {{ total_count }} that need review.
+                    <a href="{{ url_for('wallet_detail', wallet_id=wallet.id, show_all=1) }}" style="margin-left:8px;">Show all {{ total_count }}</a>
+                    {% if total_count > 1000 %}<span style="color:#b45309;"> (slow for large wallets)</span>{% endif %}
+                {% endif %}
+            </span>
         </div>
         <span id="txCount" style="color:#666;"></span>
     </div>
+
+    {% if transactions %}
 
     <div class="table-wrapper">
         <table id="txTable">
@@ -137,11 +151,17 @@
                     data-index="{{ tx.index }}">
                     <td>{{ tx.date }}</td>
                     <td><strong>{{ tx.type }}</strong></td>
-                    <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis;" title="{{ tx.details }}">
+                    {% set full_addr = tx.recipient or tx.sender %}
+                    <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis;" title="{{ tx.details }}{% if full_addr %} ({{ full_addr }}){% endif %}">
                         {% if tx.is_multi %}
                             <span class="expand-toggle" data-target="sub-{{ tx.index }}">&#9654;</span>
                         {% endif %}
                         {{ tx.details }}
+                        {% if full_addr %}
+                        <button type="button" title="Copy {{ full_addr }}" onclick="copyTxAddress('{{ full_addr }}', this)" style="background:none; border:none; cursor:pointer; padding:0 2px; vertical-align:middle; color:#888;">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                        {% endif %}
                     </td>
                     <td>{{ tx.value }}</td>
                     <td>{{ tx.blockchain }}</td>
@@ -242,6 +262,10 @@
     </div>
     {% elif total_count == 0 %}
     <p style="color:#888; margin-top:16px;">No transactions loaded yet. Upload a Chain Glance CSV above.</p>
+    {% elif search_q %}
+    <p style="color:#888; margin-top:16px;">No transactions match "{{ search_q }}".</p>
+    {% else %}
+    <p style="color:#16a34a; margin-top:16px;">All transactions classified — nothing needs review.</p>
     {% endif %}
 </div>
 {% endblock %}
@@ -324,7 +348,7 @@ function classifyItem(selectEl) {
 
     function applyFilters() {
         const val = filter.value.toLowerCase().trim();
-        const onlyReview = checkbox.checked;
+        const onlyReview = checkbox ? checkbox.checked : false;
         parentRows.forEach(function(row) {
             const type = row.getAttribute('data-type');
             const details = row.getAttribute('data-details');
@@ -358,8 +382,8 @@ function classifyItem(selectEl) {
         updateCount();
     }
 
-    filter.addEventListener('input', applyFilters);
-    checkbox.addEventListener('change', applyFilters);
+    if (filter) filter.addEventListener('input', applyFilters);
+    if (checkbox) checkbox.addEventListener('change', applyFilters);
 
     // Column sorting
     let sortCol = null;
@@ -422,5 +446,26 @@ function classifyItem(selectEl) {
 
     updateCount();
 })();
+
+function copyTxAddress(addr, btn) {
+    function flash() {
+        var original = btn.innerHTML;
+        btn.innerHTML = '<span style="color:#16a34a; font-size:0.75em; font-family:sans-serif;">Copied</span>';
+        setTimeout(function() { btn.innerHTML = original; }, 1200);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(addr).then(flash);
+        return;
+    }
+    var ta = document.createElement('textarea');
+    ta.value = addr;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); flash(); } catch (e) { alert('Copy failed: ' + addr); }
+    document.body.removeChild(ta);
+}
 </script>
 {% endblock %}
