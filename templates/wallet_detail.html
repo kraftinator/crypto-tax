@@ -202,6 +202,7 @@
                                         <option value="Payment" {% if tx.single_classification == 'Payment' %}selected{% endif %}>Payment</option>
                                         <option value="LP Deposit" {% if tx.single_classification == 'LP Deposit' %}selected{% endif %}>LP Deposit</option>
                                         <option value="LP Withdrawal" {% if tx.single_classification == 'LP Withdrawal' %}selected{% endif %}>LP Withdrawal</option>
+                                        <option value="Migration" {% if tx.single_classification == 'Migration' %}selected{% endif %}>Migration</option>
                                         <option value="Gift" {% if tx.single_classification == 'Gift' %}selected{% endif %}>Gift</option>
                                     </select>
                             {% elif tx.single_auto_label %}
@@ -246,6 +247,7 @@
                                             <option value="Payment" {% if item.classification == 'Payment' %}selected{% endif %}>Payment</option>
                                             <option value="LP Deposit" {% if item.classification == 'LP Deposit' %}selected{% endif %}>LP Deposit</option>
                                             <option value="LP Withdrawal" {% if item.classification == 'LP Withdrawal' %}selected{% endif %}>LP Withdrawal</option>
+                                            <option value="Migration" {% if item.classification == 'Migration' %}selected{% endif %}>Migration</option>
                                             <option value="Gift" {% if item.classification == 'Gift' %}selected{% endif %}>Gift</option>
                                         </select>
                                 {% elif item.auto_label %}
