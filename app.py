@@ -2,6 +2,7 @@ import os
 import io
 import csv
 import json
+import re
 import time
 import threading
 import requests
@@ -110,6 +111,230 @@ def parse_csv(filepath):
             }
             positions.append(position)
     return positions
+
+_HEX_ADDR_RE = re.compile(r'^(0x)?[0-9a-fA-F]{40}$')
+
+
+def _normalize_hex(s):
+    """Return 0x-prefixed lowercase hex if s looks like an Ethereum address, else None."""
+    if not s:
+        return None
+    s = s.strip()
+    if not _HEX_ADDR_RE.match(s):
+        return None
+    return ('0x' + s.lower()) if not s.lower().startswith('0x') else s.lower()
+
+
+def _strip_dollar(s):
+    """Parse strings like '$1.00', '$88,364.245' to float; '' returns 0.0."""
+    if not s:
+        return 0.0
+    s = str(s).replace('$', '').replace(',', '').strip()
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def detect_csv_format(filepath):
+    """Sniff the first few lines to identify the CSV format.
+    Returns 'coinbase' or 'chain_glance'.
+    """
+    with open(filepath, 'r', encoding='utf-8-sig', errors='replace') as f:
+        lines = [next(f, '').strip() for _ in range(3)]
+    if len(lines) >= 2 and lines[1].strip() == 'Transactions':
+        return 'coinbase'
+    return 'chain_glance'
+
+
+COINBASE_REWARD_SENDERS = {'Coinbase Card Rewards', 'Coinbase'}
+
+
+def parse_coinbase_csv(filepath):
+    """Parse a Coinbase 'Transactions' CSV into the system's transaction schema.
+    Auto-classification hints are attached as `_auto_cls` (item_index -> classification).
+    """
+    transactions = []
+    with open(filepath, 'r', encoding='utf-8-sig', errors='replace') as f:
+        for _ in range(3):
+            next(f, None)
+        reader = csv.DictReader(f)
+        for row in reader:
+            cleaned = {(k or '').strip(): (v or '').strip() for k, v in row.items()}
+            ttype = cleaned.get('Transaction Type', '')
+            asset = cleaned.get('Asset', '')
+            ts = cleaned.get('Timestamp', '')
+            try:
+                qty = float(cleaned.get('Quantity Transacted', '0') or 0)
+            except (ValueError, TypeError):
+                qty = 0
+            subtotal = _strip_dollar(cleaned.get('Subtotal', ''))
+            total = _strip_dollar(cleaned.get('Total (inclusive of fees and/or spread)', ''))
+            fee = _strip_dollar(cleaned.get('Fees and/or Spread', ''))
+            sender_raw = cleaned.get('Sender Address', '')
+            recipient_raw = cleaned.get('Recipient Address', '')
+            sender_hex = _normalize_hex(sender_raw)
+            recipient_hex = _normalize_hex(recipient_raw)
+
+            tx = None
+            auto_cls = {}
+
+            if ttype == 'Card Spend':
+                continue  # skip per design — USDC disposals at $0 g/l not on 8949
+
+            if ttype == 'Deposit':
+                continue  # USD bank deposit; not a crypto event
+
+            if ttype == 'Receive':
+                # Income reward stream: sender is "Coinbase Card Rewards" or "Coinbase" or Reward Income elsewhere
+                is_reward = sender_raw in COINBASE_REWARD_SENDERS
+                amount = abs(qty)
+                if amount == 0 or not asset:
+                    continue
+                tx = _make_cb_tx('RECEIVE', ts, sender_hex or '', '', asset, amount, total or subtotal)
+                if is_reward:
+                    auto_cls[0] = 'Income'
+
+            elif ttype == 'Reward Income':
+                amount = abs(qty)
+                if amount == 0 or not asset:
+                    continue
+                tx = _make_cb_tx('RECEIVE', ts, '', '', asset, amount, total or subtotal)
+                auto_cls[0] = 'Income'
+
+            elif ttype == 'Send':
+                amount = abs(qty)
+                if amount == 0 or not asset:
+                    continue
+                tx = _make_cb_tx('SEND', ts, '', recipient_hex or '', asset, amount, total or subtotal)
+
+            elif ttype == 'Buy':
+                # USD -> crypto. proceeds_to_basis = total (subtotal + fee paid)
+                amount = abs(qty)
+                if amount == 0 or not asset:
+                    continue
+                cost = total if total else (subtotal + fee)
+                tx = _make_cb_trade(ts, 'USD', cost, asset, amount, cost)
+
+            elif ttype == 'Advanced Trade Sell':
+                # crypto -> USD. proceeds_after_fees = total (subtotal - fee)
+                amount = abs(qty)
+                if amount == 0 or not asset:
+                    continue
+                proceeds = total if total else max(subtotal - fee, 0)
+                tx = _make_cb_trade(ts, asset, amount, 'USD', proceeds, proceeds)
+
+            elif ttype == 'Asset Migration':
+                # 1:1 token rename — non-taxable. Mark sent side with 'Migration' classification.
+                # Coinbase emits this as one row per side (negative qty for old, positive for new).
+                # Treat the negative-qty row as the sent side referencing old asset; recv side is the new asset.
+                # Without both sides in one row, we lose pairing — but Coinbase also pairs them via timestamp.
+                # Simplest: emit the negative-qty row as a TRADE with sent=old_asset and skip the positive-qty row.
+                # The actual paired asset name (POL, etc.) we can't know from one row alone, so we use Notes if present.
+                if qty < 0:
+                    sent_amount = abs(qty)
+                    notes = cleaned.get('Notes', '')
+                    new_asset = _extract_migration_target(notes) or asset
+                    tx = _make_cb_trade(ts, asset, sent_amount, new_asset, sent_amount, 0)
+                    auto_cls[0] = 'Migration'
+                else:
+                    continue  # skip the positive-qty side; pairing handled by sent side
+
+            elif ttype == 'Credit':
+                amount = abs(qty)
+                if amount == 0 or not asset:
+                    continue
+                tx = _make_cb_tx('RECEIVE', ts, '', '', asset, amount, total or subtotal)
+                # Credits are returns of basis — leave unclassified, user reviews
+
+            else:
+                continue  # unknown type — skip
+
+            if tx is not None:
+                if auto_cls:
+                    tx['_auto_cls'] = auto_cls
+                transactions.append(tx)
+
+    transactions.sort(key=lambda t: t.get('date', ''))
+    return transactions
+
+
+def _make_cb_tx(tx_type, ts, sender, recipient, asset, amount, usd_value):
+    """Build a non-trade Coinbase transaction in the system schema."""
+    item = {
+        'amount': amount,
+        'token': asset,
+        'token_name': asset,
+        'usd_value': str(usd_value) if usd_value else '',
+        'pretty_usd': f"${usd_value:,.2f}" if usd_value else '',
+        'is_nft': False,
+        'token_id': '',
+        'contract_address': '',
+    }
+    return {
+        'date': ts,
+        'account': '',
+        'blockchain': '',
+        'type': tx_type,
+        'volume': str(amount),
+        'symbol': asset,
+        'value': str(usd_value) if usd_value else '',
+        'currency': 'USD',
+        'fee': '',
+        'fee_currency': '',
+        'tx_hash': '',
+        'sender': sender,
+        'recipient': recipient,
+        'url': '',
+        'unsuccessful': '',
+        'spam': '',
+        'ledgers': '',
+        'summary': '',
+        'notes': '',
+        'parsed_details': {
+            'sent': [item] if tx_type == 'SEND' else [],
+            'received': [item] if tx_type == 'RECEIVE' else [],
+            'fees': [],
+        },
+    }
+
+
+def _make_cb_trade(ts, sent_asset, sent_amount, recv_asset, recv_amount, usd_value):
+    """Build a Coinbase TRADE in the system schema."""
+    sent_item = {
+        'amount': sent_amount, 'token': sent_asset, 'token_name': sent_asset,
+        'usd_value': str(usd_value) if usd_value else '',
+        'pretty_usd': f"${usd_value:,.2f}" if usd_value else '',
+        'is_nft': False, 'token_id': '', 'contract_address': '',
+    }
+    recv_item = {
+        'amount': recv_amount, 'token': recv_asset, 'token_name': recv_asset,
+        'usd_value': str(usd_value) if usd_value else '',
+        'pretty_usd': f"${usd_value:,.2f}" if usd_value else '',
+        'is_nft': False, 'token_id': '', 'contract_address': '',
+    }
+    return {
+        'date': ts, 'account': '', 'blockchain': '',
+        'type': 'TRADE', 'volume': str(sent_amount), 'symbol': sent_asset,
+        'value': str(usd_value) if usd_value else '', 'currency': 'USD',
+        'fee': '', 'fee_currency': '',
+        'tx_hash': '', 'sender': '', 'recipient': '', 'url': '',
+        'unsuccessful': '', 'spam': '', 'ledgers': '', 'summary': '', 'notes': '',
+        'parsed_details': {
+            'sent': [sent_item], 'received': [recv_item], 'fees': [],
+        },
+    }
+
+
+def _extract_migration_target(notes):
+    """Best-effort: pull the new ticker out of an Asset Migration Notes field.
+    e.g., 'Migrated MATIC to POL' -> 'POL'. Returns None if not found.
+    """
+    if not notes:
+        return None
+    m = re.search(r'\bto\s+([A-Z0-9]{2,10})\b', notes)
+    return m.group(1) if m else None
+
 
 def parse_wallet_csv(filepath):
     """Parse a Chain Glance wallet CSV."""
@@ -943,7 +1168,19 @@ def upload_wallet_csv(wallet_id):
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], f'wallet_{wallet_id}.csv')
     file.save(filepath)
-    transactions = parse_wallet_csv(filepath)
+    fmt = detect_csv_format(filepath)
+    print(f"[Upload] Detected CSV format: {fmt}")
+    if fmt == 'coinbase':
+        transactions = parse_coinbase_csv(filepath)
+    else:
+        transactions = parse_wallet_csv(filepath)
+    # Extract auto-classification hints (Coinbase parser only)
+    auto_classifications = {}
+    for i, tx in enumerate(transactions):
+        hint = tx.pop('_auto_cls', None)
+        if hint:
+            for item_idx, cls in hint.items():
+                auto_classifications[f"{wallet_id}_{i}_{item_idx}"] = cls
     # Auto-fill missing USD values from CoinGecko
     print(f"[CoinGecko] Scanning {len(transactions)} transactions for missing USD values...")
     transactions = fill_missing_usd_values(transactions, state)
@@ -965,6 +1202,10 @@ def upload_wallet_csv(wallet_id):
     to_remove = [k for k in state.get('classifications', {}) if k.startswith(f"{wallet_id}_")]
     for k in to_remove:
         del state['classifications'][k]
+
+    # Apply auto-classifications discovered during parsing
+    for k, v in auto_classifications.items():
+        state['classifications'][k] = v
 
     # Re-append manual transactions at the end and restore their classifications
     if manual_txs:
@@ -1863,6 +2104,32 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
             sent = details.get('sent', [])
             received = details.get('received', [])
 
+            # Asset Migration: classified as 'Migration' on the sent side. Carry cost basis
+            # from old token's lots to new token (no taxable event).
+            is_migration = any(
+                classifications.get(f"{wid}_{ti}_{idx}") == 'Migration'
+                for idx in range(len(sent))
+            )
+            if is_migration:
+                if sent and received:
+                    sent_token = sent[0].get('token', '')
+                    sent_amount = _parse_amount(sent[0])
+                    recv_token = received[0].get('token', '')
+                    if sent_token and recv_token and sent_amount > 0:
+                        wallet_pool = pools.setdefault(wallet_addr, [])
+                        consumed = _consume_from_pool(wallet_pool, sent_token, sent_amount, method)
+                        for cl in consumed:
+                            wallet_pool.append({
+                                'lot_id': cl['lot_id'],
+                                'date': cl['date'],
+                                'symbol': recv_token.upper(),
+                                'volume': cl['volume_used'],
+                                'price': cl['price'],
+                                'total': cl['volume_used'] * cl['price'],
+                                'source': cl['source'],
+                            })
+                continue
+
             # Consume sold side from pool (unless skipped for reconciliation)
             if not skip_trade_consumption:
                 for item in sent:
@@ -1870,6 +2137,8 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     amount = _parse_amount(item)
                     if amount <= 0 or not token:
                         continue
+                    if token.upper() == 'USD':
+                        continue  # fiat is special-cased; not lot-tracked
                     source_pool = pools.get(wallet_addr, [])
                     _consume_from_pool(source_pool, token, amount, method)
 
@@ -1879,6 +2148,8 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                 amount = _parse_amount(item)
                 if amount <= 0 or not token:
                     continue
+                if token.upper() == 'USD':
+                    continue  # fiat is special-cased; not lot-tracked
                 total_usd = _parse_usd_value(item)
                 price_per = total_usd / amount if amount > 0 else 0
                 # Force stablecoins to $1.00
@@ -2800,7 +3071,8 @@ def delete_position_ajax():
 
 _DATE_FORMATS = ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S',
                  '%Y-%m-%d %H:%M:%S %z', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d',
-                 '%b-%d-%Y %H:%M', '%b-%d-%Y')
+                 '%b-%d-%Y %H:%M', '%b-%d-%Y',
+                 '%Y-%m-%d %H:%M:%S UTC')
 
 def parse_date_to_dt(date_str):
     """Parse any known date string format into a datetime; returns datetime.min on failure."""
@@ -2999,6 +3271,11 @@ def _run_reconcile_all(state):
 
             if tx_type == 'TRADE':
                 sold_token = sent[0].get('token', '') if sent else ''
+                # Skip Buys (USD on sent side) and Migrations (non-taxable rebrand)
+                if sold_token.upper() == 'USD':
+                    continue
+                if any(classifications.get(f"{wid}_{i}_{idx}") == 'Migration' for idx in range(len(sent))):
+                    continue
                 try:
                     sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token) if sent else 0
                 except (ValueError, TypeError):
