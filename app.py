@@ -2032,6 +2032,12 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         # From known address (e.g., Coinbase) — use label as pool key
                         source_addr = known_label
                     source_pool = pools.get(source_addr, [])
+                    # Fallback: if the label-keyed pool has nothing for this token but
+                    # the sender's hex address itself has a pool (opening positions whose
+                    # account field used the hex address), use that.
+                    if not any(l.get('symbol','').upper() == token.upper() for l in source_pool):
+                        if sender in pools and any(l.get('symbol','').upper() == token.upper() for l in pools[sender]):
+                            source_pool = pools[sender]
                     consumed_lots = _consume_from_pool(source_pool, token, amount, method)
                     # Add consumed lots to destination pool (carrying original cost basis)
                     dest_pool = pools.setdefault(wallet_addr, [])
@@ -2406,7 +2412,13 @@ def reconcile():
             tx_type = tx.get('type', '').upper()
             # Include TRADEs and MINTs with Payment classification
             if tx_type == 'TRADE':
-                pass  # always include
+                _sent = tx.get('parsed_details', {}).get('sent', [])
+                _sold = _sent[0].get('token', '').upper() if _sent else ''
+                # Skip Buys (USD-on-sent) and Migrations (non-taxable rebrand)
+                if _sold == 'USD':
+                    continue
+                if any(classifications.get(f"{wid}_{i}_{idx}") == 'Migration' for idx in range(len(_sent))):
+                    continue
             elif tx_type == 'MINT':
                 # Check if any sent item is classified as Payment or LP Deposit
                 has_payment = False
