@@ -21,6 +21,8 @@
         var label = document.getElementById('wallet-label');
         if (addr.length >= 10 && addr.startsWith('0x')) {
             label.value = addr.slice(0, 6) + '...' + addr.slice(-4);
+        } else if (addr.length > 0) {
+            label.value = addr;
         } else {
             label.value = '';
         }
@@ -48,7 +50,7 @@
                     </form>
                 </td>
                 <td style="font-family:monospace; font-size:0.85em;">
-                    <span>{{ w.address[:8] }}...{{ w.address[-6:] }}</span>
+                    <span>{% if w.address.startswith('0x') %}{{ w.address[:8] }}...{{ w.address[-6:] }}{% else %}{{ w.address }}{% endif %}</span>
                     <button type="button" title="Copy address" onclick="copyWalletAddress('{{ w.address }}', this)" style="background:none; border:none; cursor:pointer; padding:2px 4px; vertical-align:middle; color:#666;">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                     </button>

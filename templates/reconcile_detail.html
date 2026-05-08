@@ -98,7 +98,7 @@ function copyText(text, el) {
         <div>
             <h2>Reconcile Trade</h2>
             <p style="color:#666; margin-top:4px;">
-                {{ wallet.label }} <span style="font-family:monospace; font-size:0.85em;">{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}</span>
+                {{ wallet.label }} <span style="font-family:monospace; font-size:0.85em;">{% if wallet.address.startswith('0x') %}{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}{% else %}{{ wallet.address }}{% endif %}</span>
             </p>
         </div>
         <a href="{{ url_for('reconcile') }}" class="btn btn-sm btn-secondary">Back to Reconcile</a>
@@ -175,7 +175,7 @@ function copyText(text, el) {
     <h2>Opening Position Lots for {{ sold_token }}</h2>
     <p style="color:#666; margin-bottom:12px;">
         {{ token_lots|length }} lots found. LIFO-highlighted lots match wallet
-        <strong style="font-family:monospace;">{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}</strong>
+        <strong style="font-family:monospace;">{% if wallet.address.startswith('0x') %}{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}{% else %}{{ wallet.address }}{% endif %}</strong>
         <span class="copy-icon" onclick="copyText('{{ wallet.address }}', this)" style="cursor:pointer;margin-left:4px;" title="Copy address"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></span>.
         Edit the Account field to map legacy names to the wallet address.
     </p>

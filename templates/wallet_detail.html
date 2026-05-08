@@ -16,7 +16,7 @@
 <div class="card">
     <div class="toolbar">
         <div>
-            <h2>{{ wallet.label }} <span style="font-size:0.6em; color:#888; font-family:monospace;">{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}</span></h2>
+            <h2>{{ wallet.label }} <span style="font-size:0.6em; color:#888; font-family:monospace;">{% if wallet.address.startswith('0x') %}{{ wallet.address[:10] }}...{{ wallet.address[-6:] }}{% else %}{{ wallet.address }}{% endif %}</span></h2>
             <p style="color:#666; margin-top:4px;">
                 {{ total_count }} transactions
                 {% if needs_review_count > 0 %}
