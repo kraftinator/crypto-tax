@@ -4,10 +4,9 @@
 <div class="card">
     <h2>Wallet Configuration</h2>
     <p style="margin-bottom: 16px; color: #666;">
-        Add your wallet addresses (up to 6). Transactions between these wallets will be recognized as transfers.
+        Add your wallet addresses. Transactions between these wallets will be recognized as transfers.
     </p>
 
-    {% if wallets|length < 6 %}
     <form action="{{ url_for('add_wallet') }}" method="post" style="display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap;">
         <input type="text" name="address" id="wallet-address" placeholder="0x address" required
                style="padding:8px 12px; border:1px solid #ddd; border-radius:6px; width:400px; font-family:monospace; font-size:0.9em;">
@@ -28,7 +27,6 @@
         }
     });
     </script>
-    {% endif %}
 
     {% if wallets %}
     <table>

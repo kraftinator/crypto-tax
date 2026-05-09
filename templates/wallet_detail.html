@@ -151,17 +151,19 @@
                     data-index="{{ tx.index }}">
                     <td>{{ tx.date }}</td>
                     <td><strong>{{ tx.type }}</strong></td>
-                    {% set full_addr = tx.recipient or tx.sender %}
-                    <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis;" title="{{ tx.details }}{% if full_addr %} ({{ full_addr }}){% endif %}">
-                        {% if tx.is_multi %}
-                            <span class="expand-toggle" data-target="sub-{{ tx.index }}">&#9654;</span>
-                        {% endif %}
-                        {{ tx.details }}
-                        {% if full_addr %}
-                        <button type="button" title="Copy {{ full_addr }}" onclick="copyTxAddress('{{ full_addr }}', this)" style="background:none; border:none; cursor:pointer; padding:0 2px; vertical-align:middle; color:#888;">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                        </button>
-                        {% endif %}
+                    {% set full_addr = tx.sender if tx.type|upper == 'RECEIVE' else (tx.recipient if tx.type|upper == 'SEND' else '') %}
+                    <td style="max-width:300px;" title="{{ tx.details }}{% if full_addr %} ({{ full_addr }}){% endif %}">
+                        <div style="display:flex; align-items:center; gap:4px;">
+                            {% if tx.is_multi %}
+                                <span class="expand-toggle" data-target="sub-{{ tx.index }}" style="flex-shrink:0;">&#9654;</span>
+                            {% endif %}
+                            <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0;">{{ tx.details }}</span>
+                            {% if full_addr %}
+                            <button type="button" title="Copy {{ full_addr }}" onclick="copyTxAddress('{{ full_addr }}', this)" style="background:none; border:none; cursor:pointer; padding:0 2px; vertical-align:middle; color:#888; flex-shrink:0;">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            </button>
+                            {% endif %}
+                        </div>
                     </td>
                     <td>{{ tx.value }}</td>
                     <td>{{ tx.blockchain }}</td>

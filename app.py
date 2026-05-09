@@ -1069,8 +1069,6 @@ def add_wallet():
     if not label or not address:
         return redirect(url_for('wallets'))
     state = ensure_state()
-    if len(state['wallets']) >= 6:
-        return redirect(url_for('wallets'))
     # Generate simple ID
     wid = str(len(state['wallets']) + 1)
     # Ensure unique ID
@@ -1969,6 +1967,11 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
             'source': 'opening',
         })
 
+    # Staked-lots pools: separate sub-pool per wallet for tokens locked via Staking.
+    # Lots move from main pool -> staked pool on Staking SEND, and back on Staking RECEIVE,
+    # preserving original cost basis and acquisition date across the lock period.
+    staked_pools = {}  # wallet_addr -> [staked lots]
+
     # Collect ALL events across ALL wallets
     lot_counter = [0]  # mutable counter for unique lot IDs
 
@@ -2068,18 +2071,38 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         'source': source,
                     })
                 elif cls == 'Staking':
-                    # Staking RECEIVE (unstaking): add lots back
-                    total_usd = _parse_usd_value(item)
-                    price_per = total_usd / amount if amount > 0 else 0
-                    pools.setdefault(wallet_addr, []).append({
-                        'lot_id': next_lot_id('2025_unstaking'),
-                        'date': tx_date,
-                        'symbol': token.upper(),
-                        'volume': amount,
-                        'price': price_per,
-                        'total': total_usd,
-                        'source': '2025_unstaking',
-                    })
+                    # Staking RECEIVE (unstaking): pull original lots from staked sub-pool
+                    # back to the main pool, preserving cost basis and acquisition date.
+                    # Any excess (staking rewards) gets a new lot at FMV.
+                    staked = staked_pools.get(wallet_addr, [])
+                    consumed = _consume_from_pool(staked, token, amount, method)
+                    recovered = 0.0
+                    dest_pool = pools.setdefault(wallet_addr, [])
+                    for cl in consumed:
+                        dest_pool.append({
+                            'lot_id': cl['lot_id'],
+                            'date': cl['date'],
+                            'symbol': token.upper(),
+                            'volume': cl['volume_used'],
+                            'price': cl['price'],
+                            'total': cl['volume_used'] * cl['price'],
+                            'source': cl['source'],
+                        })
+                        recovered += cl['volume_used']
+                    excess = amount - recovered
+                    if excess > 1e-9:
+                        # Rewards above what was originally staked → new lot at FMV.
+                        total_usd = _parse_usd_value(item) * (excess / amount) if amount > 0 else 0
+                        price_per = total_usd / excess if excess > 0 else 0
+                        dest_pool.append({
+                            'lot_id': next_lot_id('2025_unstaking'),
+                            'date': tx_date,
+                            'symbol': token.upper(),
+                            'volume': excess,
+                            'price': price_per,
+                            'total': total_usd,
+                            'source': '2025_unstaking',
+                        })
 
         elif tx_type == 'SEND':
             recipient = tx.get('recipient', '').lower()
@@ -2102,9 +2125,21 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     # already does _consume_from_pool on the source. So skip here.
                     pass
                 elif cls == 'Staking':
-                    # Staking SEND: remove lots from pool
+                    # Staking SEND: move lots from main pool to staked sub-pool, preserving
+                    # original basis and date so unstaking can restore them later.
                     source_pool = pools.get(wallet_addr, [])
-                    _consume_from_pool(source_pool, token, amount, method)
+                    consumed = _consume_from_pool(source_pool, token, amount, method)
+                    staked_dest = staked_pools.setdefault(wallet_addr, [])
+                    for cl in consumed:
+                        staked_dest.append({
+                            'lot_id': cl['lot_id'],
+                            'date': cl['date'],
+                            'symbol': token.upper(),
+                            'volume': cl['volume_used'],
+                            'price': cl['price'],
+                            'total': cl['volume_used'] * cl['price'],
+                            'source': cl['source'],
+                        })
 
         elif tx_type == 'TRADE':
             sent = details.get('sent', [])
