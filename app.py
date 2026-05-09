@@ -138,12 +138,16 @@ def _strip_dollar(s):
 
 def detect_csv_format(filepath):
     """Sniff the first few lines to identify the CSV format.
-    Returns 'coinbase' or 'chain_glance'.
+    Returns 'coinbase', 'generic', or 'chain_glance'.
     """
     with open(filepath, 'r', encoding='utf-8-sig', errors='replace') as f:
         lines = [next(f, '').strip() for _ in range(3)]
     if len(lines) >= 2 and lines[1].strip() == 'Transactions':
         return 'coinbase'
+    # Generic format: header row begins with the expected prefix
+    first = lines[0].lower() if lines else ''
+    if first.startswith('tx_hash,date,type,direction,token,amount'):
+        return 'generic'
     return 'chain_glance'
 
 
@@ -334,6 +338,108 @@ def _extract_migration_target(notes):
         return None
     m = re.search(r'\bto\s+([A-Z0-9]{2,10})\b', notes)
     return m.group(1) if m else None
+
+
+def parse_generic_csv(filepath):
+    """Parse the system's generic per-leg CSV (one row per leg, grouped by tx_hash).
+
+    Header (exact prefix detected by detect_csv_format):
+      tx_hash,date,type,direction,token,amount,usd_value,sender,recipient,
+      blockchain,is_nft,token_id,contract_address
+    """
+    groups = {}  # tx_hash -> {meta, sent[], received[], fees[]}
+    with open(filepath, 'r', newline='', encoding='utf-8-sig', errors='replace') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            cleaned = {(k or '').strip(): (v or '').strip() for k, v in row.items()}
+            tx_hash = cleaned.get('tx_hash', '')
+            if not tx_hash:
+                continue
+            direction = cleaned.get('direction', '').lower()
+            if direction not in ('sent', 'received', 'fee'):
+                continue
+            try:
+                amount = abs(float(cleaned.get('amount', '') or 0))
+            except (ValueError, TypeError):
+                continue
+            if amount <= 0:
+                continue
+            token = cleaned.get('token', '')
+            if not token:
+                continue
+            usd_raw = cleaned.get('usd_value', '')
+            try:
+                usd_val = float(usd_raw) if usd_raw else 0.0
+            except (ValueError, TypeError):
+                usd_val = 0.0
+            is_nft = cleaned.get('is_nft', '').lower() in ('true', '1', 'yes')
+            item = {
+                'amount': amount,
+                'token': token,
+                'token_name': token,
+                'usd_value': str(usd_val) if usd_val else '',
+                'pretty_usd': f"${usd_val:,.2f}" if usd_val else '',
+                'is_nft': is_nft,
+                'token_id': cleaned.get('token_id', ''),
+                'contract_address': cleaned.get('contract_address', '').lower(),
+            }
+
+            if tx_hash not in groups:
+                sender_norm = _normalize_hex(cleaned.get('sender', '')) or ''
+                recipient_norm = _normalize_hex(cleaned.get('recipient', '')) or ''
+                groups[tx_hash] = {
+                    'tx_hash': tx_hash,
+                    'date': cleaned.get('date', ''),
+                    'type': cleaned.get('type', '').upper(),
+                    'sender': sender_norm,
+                    'recipient': recipient_norm,
+                    'blockchain': cleaned.get('blockchain', ''),
+                    'sent': [],
+                    'received': [],
+                    'fees': [],
+                }
+            bucket = {'sent': 'sent', 'received': 'received', 'fee': 'fees'}[direction]
+            groups[tx_hash][bucket].append(item)
+
+    transactions = []
+    for h, g in groups.items():
+        # Compute total USD value for the row (sum of received-side items, fallback to sent)
+        try:
+            total_usd = sum(float(it['usd_value']) for it in g['received'] if it.get('usd_value'))
+            if total_usd == 0:
+                total_usd = sum(float(it['usd_value']) for it in g['sent'] if it.get('usd_value'))
+        except (ValueError, TypeError):
+            total_usd = 0.0
+        tx = {
+            'date': g['date'],
+            'account': '',
+            'blockchain': g['blockchain'],
+            'type': g['type'],
+            'volume': '',
+            'symbol': '',
+            'value': str(total_usd) if total_usd else '',
+            'currency': 'USD',
+            'fee': '',
+            'fee_currency': '',
+            'tx_hash': h,
+            'sender': g['sender'],
+            'recipient': g['recipient'],
+            'url': '',
+            'unsuccessful': '',
+            'spam': '',
+            'ledgers': '',
+            'summary': '',
+            'notes': '',
+            'parsed_details': {
+                'sent': g['sent'],
+                'received': g['received'],
+                'fees': g['fees'],
+            },
+        }
+        transactions.append(tx)
+
+    transactions.sort(key=lambda t: t.get('date', ''))
+    return transactions
 
 
 def parse_wallet_csv(filepath):
@@ -1170,6 +1276,8 @@ def upload_wallet_csv(wallet_id):
     print(f"[Upload] Detected CSV format: {fmt}")
     if fmt == 'coinbase':
         transactions = parse_coinbase_csv(filepath)
+    elif fmt == 'generic':
+        transactions = parse_generic_csv(filepath)
     else:
         transactions = parse_wallet_csv(filepath)
     # Extract auto-classification hints (Coinbase parser only)
