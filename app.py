@@ -477,11 +477,15 @@ def parse_wallet_csv(filepath):
             tx_type = cleaned.get('Type', '').upper()
             if tx_type in ('APPROVE', 'EXECUTE'):
                 continue
+            # BURN with proceeds (e.g., Polymarket position exit) is functionally a TRADE.
+            # parse_ledgers categorizes legs by amount sign, so renaming is safe even
+            # for plain burns (received side just stays empty → zero proceeds).
+            type_for_storage = 'TRADE' if tx_type == 'BURN' else cleaned.get('Type', '')
             tx = {
                 'date': cleaned.get('Date', ''),
                 'account': cleaned.get('Account', ''),
                 'blockchain': blockchain,
-                'type': cleaned.get('Type', ''),
+                'type': type_for_storage,
                 'volume': cleaned.get('Volume', ''),
                 'symbol': cleaned.get('Symbol', ''),
                 'value': cleaned.get('Value', ''),
@@ -3272,6 +3276,13 @@ def format_date_mmddyyyy(date_str):
     return date_str
 
 
+def _shorten_token_label(s):
+    """Collapse very long #NNNN...NNNN tokenIds in a token label to first 8 + ... + last 4."""
+    if not s:
+        return s
+    return re.sub(r'#([0-9a-fA-F]{20,})', lambda m: f"#{m.group(1)[:8]}…{m.group(1)[-4:]}", s)
+
+
 def build_form8949_rows(state):
     """Build Form 8949 rows from reconciliation data.
 
@@ -3303,7 +3314,7 @@ def build_form8949_rows(state):
             # Single lot - one row
             lot = lots_used[0]
             rows.append({
-                'description': f"{lot['volume_used']:,.8f}".rstrip('0').rstrip('.') + f" {sold_token}",
+                'description': f"{lot['volume_used']:,.8f}".rstrip('0').rstrip('.') + f" {_shorten_token_label(sold_token)}",
                 'date_acquired': format_date_mmddyyyy(lot['date_acquired']),
                 'date_sold': format_date_mmddyyyy(date_sold),
                 'proceeds': round(total_proceeds, 2),
@@ -3323,7 +3334,7 @@ def build_form8949_rows(state):
                     lot_proceeds = 0
                 lot_gain_loss = lot_proceeds - lot['cost_basis']
                 rows.append({
-                    'description': f"{lot['volume_used']:,.8f}".rstrip('0').rstrip('.') + f" {sold_token}",
+                    'description': f"{lot['volume_used']:,.8f}".rstrip('0').rstrip('.') + f" {_shorten_token_label(sold_token)}",
                     'date_acquired': format_date_mmddyyyy(lot['date_acquired']),
                     'date_sold': format_date_mmddyyyy(date_sold),
                     'proceeds': round(lot_proceeds, 2),
