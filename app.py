@@ -144,9 +144,10 @@ def detect_csv_format(filepath):
         lines = [next(f, '').strip() for _ in range(3)]
     if len(lines) >= 2 and lines[1].strip() == 'Transactions':
         return 'coinbase'
-    # Generic format: header row begins with the expected prefix
+    # Generic format: header row begins with the expected prefix (allow quoted columns)
     first = lines[0].lower() if lines else ''
-    if first.startswith('tx_hash,date,type,direction,token,amount'):
+    normalized = first.replace('"', '').replace("'", '')
+    if normalized.startswith('tx_hash,date,type,direction,token,amount'):
         return 'generic'
     return 'chain_glance'
 
@@ -340,6 +341,22 @@ def _extract_migration_target(notes):
     return m.group(1) if m else None
 
 
+_EXPLORER_BY_CHAIN = {
+    'base': 'https://basescan.org/tx/',
+    'eth': 'https://etherscan.io/tx/',
+    'ethereum': 'https://etherscan.io/tx/',
+    'polygon': 'https://polygonscan.com/tx/',
+    'matic': 'https://polygonscan.com/tx/',
+    'optimism': 'https://optimistic.etherscan.io/tx/',
+    'arbitrum': 'https://arbiscan.io/tx/',
+}
+
+
+def _explorer_url(blockchain, tx_hash):
+    base = _EXPLORER_BY_CHAIN.get((blockchain or '').lower())
+    return f"{base}{tx_hash}" if base and tx_hash else ''
+
+
 def parse_generic_csv(filepath):
     """Parse the system's generic per-leg CSV (one row per leg, grouped by tx_hash).
 
@@ -424,7 +441,7 @@ def parse_generic_csv(filepath):
             'tx_hash': h,
             'sender': g['sender'],
             'recipient': g['recipient'],
-            'url': '',
+            'url': _explorer_url(g['blockchain'], h),
             'unsuccessful': '',
             'spam': '',
             'ledgers': '',
@@ -1736,7 +1753,7 @@ def wallet_detail(wallet_id):
             'details': summary,
             'value': formatted_value,
             'tx_hash': tx.get('tx_hash', ''),
-            'url': tx.get('url', ''),
+            'url': tx.get('url') or _explorer_url(tx.get('blockchain', ''), tx.get('tx_hash', '')),
             'blockchain': tx.get('blockchain', ''),
             'needs_classification': needs_classification,
             'sender': tx.get('sender', ''),
