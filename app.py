@@ -2140,16 +2140,31 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
             tx_date = tx.get('date', '')
             if up_to_date and tx_date > up_to_date:
                 continue
+            tx_type = tx.get('type', '').upper()
+            details = tx.get('parsed_details', {})
+            # For TRADE/MINT, split the event so received-side adds happen in phase 0,
+            # before any sent-side consumes in phase 1 at the same timestamp. This
+            # ensures a tx-pair at the same second (one adds WETH, another consumes
+            # WETH) processes correctly regardless of original ordering.
+            if tx_type in ('TRADE', 'MINT'):
+                is_migration = any(
+                    classifications.get(f"{wid}_{ti}_{idx}") == 'Migration'
+                    for idx in range(len(details.get('sent', [])))
+                )
+                if not is_migration and details.get('received'):
+                    events.append({
+                        'date': tx_date, 'phase': 0, 'kind': 'trade_recv_add',
+                        'wallet_id': wid, 'wallet_addr': wallet_addr,
+                        'tx_index': ti, 'tx': tx,
+                    })
             events.append({
-                'date': tx_date,
-                'wallet_id': wid,
-                'wallet_addr': wallet_addr,
-                'tx_index': ti,
-                'tx': tx,
+                'date': tx_date, 'phase': 1, 'kind': 'main',
+                'wallet_id': wid, 'wallet_addr': wallet_addr,
+                'tx_index': ti, 'tx': tx,
             })
 
-    # Sort chronologically
-    events.sort(key=lambda e: e['date'])
+    # Sort chronologically with phase as tiebreaker (adds before consumes at same ts)
+    events.sort(key=lambda e: (e['date'], e['phase']))
 
     # Process each event
     for event in events:
@@ -2161,9 +2176,60 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
         details = tx.get('parsed_details', {})
         tx_date = tx.get('date', '')
 
+        # Phase 0: TRADE/MINT received-side adds only.
+        if event.get('kind') == 'trade_recv_add':
+            received = details.get('received', [])
+            for ii, item in enumerate(received):
+                token = item.get('token', '')
+                amount = _parse_amount(item)
+                if amount <= 0 or not token:
+                    continue
+                if token.upper() == 'USD':
+                    continue
+                total_usd = _parse_usd_value(item)
+                price_per = total_usd / amount if amount > 0 else 0
+                if token.upper() in STABLECOINS:
+                    price_per = 1.0
+                    total_usd = amount
+                src_tag = '2025_trade' if tx_type == 'TRADE' else '2025_mint'
+                pools.setdefault(wallet_addr, []).append({
+                    'lot_id': next_lot_id(src_tag),
+                    'date': tx_date,
+                    'symbol': token.upper(),
+                    'volume': amount,
+                    'price': price_per,
+                    'total': total_usd,
+                    'source': src_tag,
+                })
+            continue
+
         if tx_type == 'RECEIVE':
             sender = tx.get('sender', '').lower()
             received = details.get('received', [])
+            # Self-receive (sender == this wallet): typically a contract callback or
+            # MEV/refund returning value. Treat as fresh inflow at FMV rather than as
+            # a transfer (which would drain & refill the wallet's own pool, losing basis).
+            if sender == wallet_addr:
+                for ii, item in enumerate(received):
+                    token = item.get('token', '')
+                    amount = _parse_amount(item)
+                    if amount <= 0 or not token:
+                        continue
+                    total_usd = _parse_usd_value(item)
+                    price_per = total_usd / amount if amount > 0 else 0
+                    if token.upper() in STABLECOINS:
+                        price_per = 1.0
+                        total_usd = amount
+                    pools.setdefault(wallet_addr, []).append({
+                        'lot_id': next_lot_id('self_receive'),
+                        'date': tx_date,
+                        'symbol': token.upper(),
+                        'volume': amount,
+                        'price': price_per,
+                        'total': total_usd,
+                        'source': 'self_receive',
+                    })
+                continue
             is_from_own_wallet = sender in own_addresses
             is_from_known_address = sender in known_addr_labels
             known_label = known_addr_labels.get(sender, '').lower()
@@ -2327,7 +2393,8 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             })
                 continue
 
-            # Consume sold side from pool (unless skipped for reconciliation)
+            # Consume sold side from pool (unless skipped for reconciliation).
+            # Received-side adds were handled in phase 0 above.
             if not skip_trade_consumption:
                 for item in sent:
                     token = item.get('token', '')
@@ -2338,30 +2405,6 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         continue  # fiat is special-cased; not lot-tracked
                     source_pool = pools.get(wallet_addr, [])
                     _consume_from_pool(source_pool, token, amount, method)
-
-            # Add received side as new lots
-            for ii, item in enumerate(received):
-                token = item.get('token', '')
-                amount = _parse_amount(item)
-                if amount <= 0 or not token:
-                    continue
-                if token.upper() == 'USD':
-                    continue  # fiat is special-cased; not lot-tracked
-                total_usd = _parse_usd_value(item)
-                price_per = total_usd / amount if amount > 0 else 0
-                # Force stablecoins to $1.00
-                if token.upper() in STABLECOINS:
-                    price_per = 1.0
-                    total_usd = amount
-                pools.setdefault(wallet_addr, []).append({
-                    'lot_id': next_lot_id('2025_trade'),
-                    'date': tx_date,
-                    'symbol': token.upper(),
-                    'volume': amount,
-                    'price': price_per,
-                    'total': total_usd,
-                    'source': '2025_trade',
-                })
 
         elif tx_type == 'MINT':
             sent = details.get('sent', [])
@@ -2379,7 +2422,8 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     has_lp = True
 
             if has_payment or has_lp:
-                # Consume sent tokens from pool (unless skipped for reconciliation)
+                # Consume sent tokens from pool (unless skipped for reconciliation).
+                # Received-side adds were handled in phase 0 above.
                 if not skip_trade_consumption:
                     for item in sent:
                         token = item.get('token', '')
@@ -2388,24 +2432,6 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             continue
                         source_pool = pools.get(wallet_addr, [])
                         _consume_from_pool(source_pool, token, amount, method)
-
-                # Add received items as new lots
-                for ii, item in enumerate(received):
-                    token = item.get('token', '')
-                    amount = _parse_amount(item)
-                    if amount <= 0 or not token:
-                        continue
-                    total_usd = _parse_usd_value(item)
-                    price_per = total_usd / amount if amount > 0 else 0
-                    pools.setdefault(wallet_addr, []).append({
-                        'lot_id': next_lot_id('2025_mint'),
-                        'date': tx_date,
-                        'symbol': token.upper(),
-                        'volume': amount,
-                        'price': price_per,
-                        'total': total_usd,
-                        'source': '2025_mint',
-                    })
 
     return pools
 
