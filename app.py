@@ -1822,20 +1822,42 @@ def classify_transaction():
 
 # ============ RECONCILE (Phase 3) ============
 
+RELIABLE_PRICED_TOKENS = {'ETH', 'WETH', 'BTC', 'WBTC', 'USDC', 'USDT', 'DAI',
+                          'LUSD', 'BUSD', 'GUSD', 'USDP', 'TUSD', 'FRAX'}
+
+
 def get_trade_proceeds(tx):
-    """Get the USD proceeds from a trade (value of what was received)."""
+    """Get the USD proceeds from a trade. In a fair-market swap both sides are
+    economically equal, but exotic-token USD values can be wildly off. If the
+    sent side is a reliably-priced token (ETH/WETH/BTC/stablecoins) and the
+    received side is not, use the sent side's USD as the more trustworthy
+    proceeds figure.
+    """
     details = tx.get('parsed_details', {})
+    sent = details.get('sent', [])
     received = details.get('received', [])
-    total = 0.0
-    for r in received:
-        usd_val = r.get('usd_value', '') or r.get('pretty_usd', '')
-        if isinstance(usd_val, str):
-            usd_val = usd_val.replace('$', '').replace(',', '').strip()
-        try:
-            total += abs(float(usd_val))
-        except (ValueError, TypeError):
-            pass
-    return total
+
+    def side_total(items):
+        total = 0.0
+        for it in items:
+            usd_val = it.get('usd_value', '') or it.get('pretty_usd', '')
+            if isinstance(usd_val, str):
+                usd_val = usd_val.replace('$', '').replace(',', '').strip()
+            try:
+                total += abs(float(usd_val))
+            except (ValueError, TypeError):
+                pass
+        return total
+
+    def has_reliable(items):
+        return any((it.get('token') or '').upper() in RELIABLE_PRICED_TOKENS for it in items)
+
+    sent_total = side_total(sent)
+    recv_total = side_total(received)
+
+    if has_reliable(sent) and not has_reliable(received) and sent_total > 0:
+        return sent_total
+    return recv_total
 
 
 def build_2025_lots(state, wallet_id):
@@ -2383,18 +2405,23 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
     return pools
 
 
-def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', consume=False):
+def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', consume=False, as_of_date=None):
     """Match lots from a pre-built virtual pool for a sold token using LIFO or FIFO.
 
     pool_lots: list of lot dicts from the wallet's virtual pool
     consume: if True, mutate pool_lots in-place (reduce volumes, remove exhausted lots)
+    as_of_date: if provided, only consider lots whose acquisition date <= as_of_date
+        (prevents future lots from satisfying past trades when the pool is built
+        with all-time data).
     Returns (matched_lots, remaining_amount, warning).
     matched_lots: [{'lot_index': str, 'volume_used': float, 'cost_basis': float,
                      'date_acquired': str, 'price': float, 'source': str}]
     """
     symbol_upper = sold_token.upper()
     # Gather matching lots with their pool indices
-    matching = [(i, lot) for i, lot in enumerate(pool_lots) if lot['symbol'].upper() == symbol_upper]
+    matching = [(i, lot) for i, lot in enumerate(pool_lots)
+                if lot['symbol'].upper() == symbol_upper
+                and (as_of_date is None or lot['date'] <= as_of_date)]
     # Sort by date: LIFO = newest first, FIFO = oldest first
     matching.sort(key=lambda x: x[1]['date'], reverse=(method == 'LIFO'))
 
@@ -3511,7 +3538,8 @@ def _run_reconcile_all(state):
         wallet_pool = recon_pools.get(wallet_addr, [])
 
         matched_lots, remaining, warning = lifo_match_from_pool(
-            wallet_pool, trade['sold_token'], trade['sold_amount'], method=method, consume=True)
+            wallet_pool, trade['sold_token'], trade['sold_amount'],
+            method=method, consume=True, as_of_date=trade['date'])
 
         dust_tol = max(1e-9, trade['sold_amount'] * 0.0000001)
         if matched_lots and remaining < dust_tol:
