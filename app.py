@@ -1473,15 +1473,18 @@ def format_usd(value):
     return f"${val:,.2f}"
 
 def format_date(date_str):
-    """Format ISO date to more readable format: YYYY-MM-DD HH:MM."""
+    """Format any known date string to 'YYYY-MM-DD HH:MM'. Falls back to the raw
+    string if parsing fails."""
     if not date_str:
         return ''
-    # Handle ISO format like "2025-06-25T17:36:00Z" or "2025-06-25 17:36:00"
-    date_str = date_str.replace('T', ' ').replace('Z', '')
-    # Truncate to minutes
-    if len(date_str) > 16:
-        date_str = date_str[:16]
-    return date_str
+    dt = parse_date_to_dt(date_str)
+    if dt and dt != datetime.min:
+        return dt.strftime('%Y-%m-%d %H:%M')
+    # Fallback: legacy behavior — handle ISO-ish strings and truncate
+    s = date_str.replace('T', ' ').replace('Z', '')
+    if len(s) > 16:
+        s = s[:16]
+    return s
 
 def build_line_items(tx):
     """Build line items from parsed_details for expandable sub-rows."""
@@ -2422,6 +2425,11 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     has_lp = True
 
             if has_payment or has_lp:
+                # Trigger reconcile callback BEFORE consuming sent side, so it sees
+                # the pool snapshot at this MINT's moment.
+                if trade_callback is not None:
+                    trade_callback(wid, ti, tx, pools.setdefault(wallet_addr, []), method)
+
                 # Consume sent tokens from pool (unless skipped for reconciliation).
                 # Received-side adds were handled in phase 0 above.
                 if not skip_trade_consumption:
