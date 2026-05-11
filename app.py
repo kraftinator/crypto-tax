@@ -2061,7 +2061,7 @@ def _consume_from_pool(pool_lots, symbol, amount, method):
     return consumed
 
 
-def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumption=False):
+def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumption=False, trade_callback=None):
     """Build virtual lot pools for all wallets by processing events chronologically.
 
     Returns: {wallet_address_lower: [lot_dicts]}
@@ -2295,6 +2295,11 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
         elif tx_type == 'TRADE':
             sent = details.get('sent', [])
             received = details.get('received', [])
+
+            # Hook for chronological reconcile: callback can match the trade against
+            # the pool's current snapshot before this trade's consumption happens.
+            if trade_callback is not None:
+                trade_callback(wid, ti, tx, pools.setdefault(wallet_addr, []), method)
 
             # Asset Migration: classified as 'Migration' on the sent side. Carry cost basis
             # from old token's lots to new token (no taxable event).
@@ -3453,113 +3458,63 @@ def _process_transfers(state):
 
 
 def _run_reconcile_all(state):
-    """Shared logic for auto-reconciling all trades using virtual lot pools.
+    """Auto-reconcile all trades via a single chronological pass over events.
 
-    Builds virtual lot pools for all wallets, then processes trades chronologically.
-    The pool already accounts for transfers carrying cost basis between wallets.
+    The pool is built incrementally; trade reconciliation happens at the moment
+    each TRADE event is encountered, so it sees the pool exactly as it stood at
+    that point in time (including transfers in but excluding future transfers
+    that would later drain the lots).
     """
-    transactions = state.get('transactions', {})
     classifications = state.get('classifications', {})
     reconciliations = state.get('reconciliations', {})
     method = state.get('cost_basis_method', 'LIFO')
 
-    # Collect all reconcilable trades across wallets
-    all_trades = []
-    for wid, txs in transactions.items():
-        wallet = next((w for w in state['wallets'] if w['id'] == wid), None)
-        if not wallet:
-            continue
-        for i, tx in enumerate(txs):
-            recon_key = f"{wid}_{i}"
-            if recon_key in reconciliations:
-                continue
-
-            tx_type = tx.get('type', '').upper()
-            details = tx.get('parsed_details', {})
-            sent = details.get('sent', [])
-            received = details.get('received', [])
-
-            if tx_type == 'TRADE':
-                sold_token = sent[0].get('token', '') if sent else ''
-                # Skip Buys (USD on sent side) and Migrations (non-taxable rebrand)
-                if sold_token.upper() == 'USD':
-                    continue
-                if any(classifications.get(f"{wid}_{i}_{idx}") == 'Migration' for idx in range(len(sent))):
-                    continue
-                try:
-                    sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token) if sent else 0
-                except (ValueError, TypeError):
-                    continue
-                proceeds = get_trade_proceeds(tx)
-            elif tx_type == 'MINT':
-                has_payment = any(classifications.get(f"{wid}_{i}_{idx}") in ('Payment', 'LP Deposit')
-                                  for idx, _ in enumerate(sent))
-                if not has_payment:
-                    continue
-                sold_token = sent[0].get('token', '') if sent else ''
-                try:
-                    total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
-                    total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
-                except (ValueError, TypeError):
-                    continue
-                sold_amount = total_sent - total_refund
-                try:
-                    sent_usd = sum(abs(float(s.get('usd_value', '0').replace('$','').replace(',',''))) for s in sent if s.get('token') == sold_token)
-                    refund_usd = sum(abs(float(r.get('usd_value', '0').replace('$','').replace(',',''))) for r in received if r.get('token') == sold_token)
-                except (ValueError, TypeError):
-                    continue
-                proceeds = sent_usd - refund_usd
-            else:
-                continue
-
-            if sold_amount <= 0:
-                continue
-
-            all_trades.append({
-                'wid': wid,
-                'tx_index': i,
-                'recon_key': recon_key,
-                'wallet': wallet,
-                'date': tx.get('date', ''),
-                'sold_token': sold_token,
-                'sold_amount': sold_amount,
-                'proceeds': proceeds,
-            })
-
-    # Sort trades chronologically so lot consumption is in order
-    all_trades.sort(key=lambda x: x['date'])
-
-    # Build pools fresh for reconciliation — skip trade sold-side consumption
-    # so _run_reconcile_all can consume them in chronological order
-    recon_pools = build_wallet_lot_pools(state, method, skip_trade_consumption=True)
-
-    for trade in all_trades:
-        wallet_addr = trade['wallet']['address'].lower()
-        wallet_pool = recon_pools.get(wallet_addr, [])
-
-        matched_lots, remaining, warning = lifo_match_from_pool(
-            wallet_pool, trade['sold_token'], trade['sold_amount'],
-            method=method, consume=True, as_of_date=trade['date'])
-
-        dust_tol = max(1e-9, trade['sold_amount'] * 0.0000001)
+    def trade_cb(wid, ti, tx, wallet_pool, m):
+        recon_key = f"{wid}_{ti}"
+        if recon_key in reconciliations:
+            return
+        details = tx.get('parsed_details', {})
+        sent = details.get('sent', [])
+        if not sent:
+            return
+        sold_token = sent[0].get('token', '')
+        # Skip Buys (USD on sent side) and Migrations (non-taxable rebrand)
+        if sold_token.upper() == 'USD':
+            return
+        if any(classifications.get(f"{wid}_{ti}_{idx}") == 'Migration' for idx in range(len(sent))):
+            return
+        try:
+            sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
+        except (ValueError, TypeError):
+            return
+        if sold_amount <= 0:
+            return
+        proceeds = get_trade_proceeds(tx)
+        matched_lots, remaining, _ = lifo_match_from_pool(
+            wallet_pool, sold_token, sold_amount, method=m, consume=False)
+        dust_tol = max(1e-9, sold_amount * 0.0000001)
         if matched_lots and remaining < dust_tol:
-            total_cost_basis = sum(m['cost_basis'] for m in matched_lots)
-            gain_loss = trade['proceeds'] - total_cost_basis
-            terms = [determine_term(m['date_acquired'], trade['date']) for m in matched_lots]
+            total_cost_basis = sum(mm['cost_basis'] for mm in matched_lots)
+            trade_date = tx.get('date', '')
+            gain_loss = proceeds - total_cost_basis
+            terms = [determine_term(mm['date_acquired'], trade_date) for mm in matched_lots]
             if all(t == 'long' for t in terms):
                 overall_term = 'long'
             elif all(t == 'short' for t in terms):
                 overall_term = 'short'
             else:
                 overall_term = 'mixed'
-
-            reconciliations[trade['recon_key']] = {
+            reconciliations[recon_key] = {
                 'lots_used': matched_lots,
-                'proceeds': trade['proceeds'],
+                'proceeds': proceeds,
                 'gain_loss': gain_loss,
                 'term': overall_term,
                 'status': 'matched',
             }
+
+    # Single chronological pass: the trade callback fires before the trade's
+    # consumption/add, so it sees the pool's state at that moment.
+    build_wallet_lot_pools(state, method, trade_callback=trade_cb)
 
     state['reconciliations'] = reconciliations
     save_state(state)
