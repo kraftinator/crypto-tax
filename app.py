@@ -1473,15 +1473,18 @@ def format_usd(value):
     return f"${val:,.2f}"
 
 def format_date(date_str):
-    """Format ISO date to more readable format: YYYY-MM-DD HH:MM."""
+    """Format any known date string to 'YYYY-MM-DD HH:MM'. Falls back to the raw
+    string if parsing fails."""
     if not date_str:
         return ''
-    # Handle ISO format like "2025-06-25T17:36:00Z" or "2025-06-25 17:36:00"
-    date_str = date_str.replace('T', ' ').replace('Z', '')
-    # Truncate to minutes
-    if len(date_str) > 16:
-        date_str = date_str[:16]
-    return date_str
+    dt = parse_date_to_dt(date_str)
+    if dt and dt != datetime.min:
+        return dt.strftime('%Y-%m-%d %H:%M')
+    # Fallback: legacy behavior — handle ISO-ish strings and truncate
+    s = date_str.replace('T', ' ').replace('Z', '')
+    if len(s) > 16:
+        s = s[:16]
+    return s
 
 def build_line_items(tx):
     """Build line items from parsed_details for expandable sub-rows."""
@@ -1822,20 +1825,42 @@ def classify_transaction():
 
 # ============ RECONCILE (Phase 3) ============
 
+RELIABLE_PRICED_TOKENS = {'ETH', 'WETH', 'BTC', 'WBTC', 'USDC', 'USDT', 'DAI',
+                          'LUSD', 'BUSD', 'GUSD', 'USDP', 'TUSD', 'FRAX'}
+
+
 def get_trade_proceeds(tx):
-    """Get the USD proceeds from a trade (value of what was received)."""
+    """Get the USD proceeds from a trade. In a fair-market swap both sides are
+    economically equal, but exotic-token USD values can be wildly off. If the
+    sent side is a reliably-priced token (ETH/WETH/BTC/stablecoins) and the
+    received side is not, use the sent side's USD as the more trustworthy
+    proceeds figure.
+    """
     details = tx.get('parsed_details', {})
+    sent = details.get('sent', [])
     received = details.get('received', [])
-    total = 0.0
-    for r in received:
-        usd_val = r.get('usd_value', '') or r.get('pretty_usd', '')
-        if isinstance(usd_val, str):
-            usd_val = usd_val.replace('$', '').replace(',', '').strip()
-        try:
-            total += abs(float(usd_val))
-        except (ValueError, TypeError):
-            pass
-    return total
+
+    def side_total(items):
+        total = 0.0
+        for it in items:
+            usd_val = it.get('usd_value', '') or it.get('pretty_usd', '')
+            if isinstance(usd_val, str):
+                usd_val = usd_val.replace('$', '').replace(',', '').strip()
+            try:
+                total += abs(float(usd_val))
+            except (ValueError, TypeError):
+                pass
+        return total
+
+    def has_reliable(items):
+        return any((it.get('token') or '').upper() in RELIABLE_PRICED_TOKENS for it in items)
+
+    sent_total = side_total(sent)
+    recv_total = side_total(received)
+
+    if has_reliable(sent) and not has_reliable(received) and sent_total > 0:
+        return sent_total
+    return recv_total
 
 
 def build_2025_lots(state, wallet_id):
@@ -2039,7 +2064,7 @@ def _consume_from_pool(pool_lots, symbol, amount, method):
     return consumed
 
 
-def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumption=False):
+def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumption=False, trade_callback=None):
     """Build virtual lot pools for all wallets by processing events chronologically.
 
     Returns: {wallet_address_lower: [lot_dicts]}
@@ -2118,16 +2143,31 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
             tx_date = tx.get('date', '')
             if up_to_date and tx_date > up_to_date:
                 continue
+            tx_type = tx.get('type', '').upper()
+            details = tx.get('parsed_details', {})
+            # For TRADE/MINT, split the event so received-side adds happen in phase 0,
+            # before any sent-side consumes in phase 1 at the same timestamp. This
+            # ensures a tx-pair at the same second (one adds WETH, another consumes
+            # WETH) processes correctly regardless of original ordering.
+            if tx_type in ('TRADE', 'MINT'):
+                is_migration = any(
+                    classifications.get(f"{wid}_{ti}_{idx}") == 'Migration'
+                    for idx in range(len(details.get('sent', [])))
+                )
+                if not is_migration and details.get('received'):
+                    events.append({
+                        'date': tx_date, 'phase': 0, 'kind': 'trade_recv_add',
+                        'wallet_id': wid, 'wallet_addr': wallet_addr,
+                        'tx_index': ti, 'tx': tx,
+                    })
             events.append({
-                'date': tx_date,
-                'wallet_id': wid,
-                'wallet_addr': wallet_addr,
-                'tx_index': ti,
-                'tx': tx,
+                'date': tx_date, 'phase': 1, 'kind': 'main',
+                'wallet_id': wid, 'wallet_addr': wallet_addr,
+                'tx_index': ti, 'tx': tx,
             })
 
-    # Sort chronologically
-    events.sort(key=lambda e: e['date'])
+    # Sort chronologically with phase as tiebreaker (adds before consumes at same ts)
+    events.sort(key=lambda e: (e['date'], e['phase']))
 
     # Process each event
     for event in events:
@@ -2139,9 +2179,60 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
         details = tx.get('parsed_details', {})
         tx_date = tx.get('date', '')
 
+        # Phase 0: TRADE/MINT received-side adds only.
+        if event.get('kind') == 'trade_recv_add':
+            received = details.get('received', [])
+            for ii, item in enumerate(received):
+                token = item.get('token', '')
+                amount = _parse_amount(item)
+                if amount <= 0 or not token:
+                    continue
+                if token.upper() == 'USD':
+                    continue
+                total_usd = _parse_usd_value(item)
+                price_per = total_usd / amount if amount > 0 else 0
+                if token.upper() in STABLECOINS:
+                    price_per = 1.0
+                    total_usd = amount
+                src_tag = '2025_trade' if tx_type == 'TRADE' else '2025_mint'
+                pools.setdefault(wallet_addr, []).append({
+                    'lot_id': next_lot_id(src_tag),
+                    'date': tx_date,
+                    'symbol': token.upper(),
+                    'volume': amount,
+                    'price': price_per,
+                    'total': total_usd,
+                    'source': src_tag,
+                })
+            continue
+
         if tx_type == 'RECEIVE':
             sender = tx.get('sender', '').lower()
             received = details.get('received', [])
+            # Self-receive (sender == this wallet): typically a contract callback or
+            # MEV/refund returning value. Treat as fresh inflow at FMV rather than as
+            # a transfer (which would drain & refill the wallet's own pool, losing basis).
+            if sender == wallet_addr:
+                for ii, item in enumerate(received):
+                    token = item.get('token', '')
+                    amount = _parse_amount(item)
+                    if amount <= 0 or not token:
+                        continue
+                    total_usd = _parse_usd_value(item)
+                    price_per = total_usd / amount if amount > 0 else 0
+                    if token.upper() in STABLECOINS:
+                        price_per = 1.0
+                        total_usd = amount
+                    pools.setdefault(wallet_addr, []).append({
+                        'lot_id': next_lot_id('self_receive'),
+                        'date': tx_date,
+                        'symbol': token.upper(),
+                        'volume': amount,
+                        'price': price_per,
+                        'total': total_usd,
+                        'source': 'self_receive',
+                    })
+                continue
             is_from_own_wallet = sender in own_addresses
             is_from_known_address = sender in known_addr_labels
             known_label = known_addr_labels.get(sender, '').lower()
@@ -2274,6 +2365,11 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
             sent = details.get('sent', [])
             received = details.get('received', [])
 
+            # Hook for chronological reconcile: callback can match the trade against
+            # the pool's current snapshot before this trade's consumption happens.
+            if trade_callback is not None:
+                trade_callback(wid, ti, tx, pools.setdefault(wallet_addr, []), method)
+
             # Asset Migration: classified as 'Migration' on the sent side. Carry cost basis
             # from old token's lots to new token (no taxable event).
             is_migration = any(
@@ -2300,7 +2396,8 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             })
                 continue
 
-            # Consume sold side from pool (unless skipped for reconciliation)
+            # Consume sold side from pool (unless skipped for reconciliation).
+            # Received-side adds were handled in phase 0 above.
             if not skip_trade_consumption:
                 for item in sent:
                     token = item.get('token', '')
@@ -2311,30 +2408,6 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         continue  # fiat is special-cased; not lot-tracked
                     source_pool = pools.get(wallet_addr, [])
                     _consume_from_pool(source_pool, token, amount, method)
-
-            # Add received side as new lots
-            for ii, item in enumerate(received):
-                token = item.get('token', '')
-                amount = _parse_amount(item)
-                if amount <= 0 or not token:
-                    continue
-                if token.upper() == 'USD':
-                    continue  # fiat is special-cased; not lot-tracked
-                total_usd = _parse_usd_value(item)
-                price_per = total_usd / amount if amount > 0 else 0
-                # Force stablecoins to $1.00
-                if token.upper() in STABLECOINS:
-                    price_per = 1.0
-                    total_usd = amount
-                pools.setdefault(wallet_addr, []).append({
-                    'lot_id': next_lot_id('2025_trade'),
-                    'date': tx_date,
-                    'symbol': token.upper(),
-                    'volume': amount,
-                    'price': price_per,
-                    'total': total_usd,
-                    'source': '2025_trade',
-                })
 
         elif tx_type == 'MINT':
             sent = details.get('sent', [])
@@ -2352,7 +2425,13 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     has_lp = True
 
             if has_payment or has_lp:
-                # Consume sent tokens from pool (unless skipped for reconciliation)
+                # Trigger reconcile callback BEFORE consuming sent side, so it sees
+                # the pool snapshot at this MINT's moment.
+                if trade_callback is not None:
+                    trade_callback(wid, ti, tx, pools.setdefault(wallet_addr, []), method)
+
+                # Consume sent tokens from pool (unless skipped for reconciliation).
+                # Received-side adds were handled in phase 0 above.
                 if not skip_trade_consumption:
                     for item in sent:
                         token = item.get('token', '')
@@ -2362,39 +2441,26 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         source_pool = pools.get(wallet_addr, [])
                         _consume_from_pool(source_pool, token, amount, method)
 
-                # Add received items as new lots
-                for ii, item in enumerate(received):
-                    token = item.get('token', '')
-                    amount = _parse_amount(item)
-                    if amount <= 0 or not token:
-                        continue
-                    total_usd = _parse_usd_value(item)
-                    price_per = total_usd / amount if amount > 0 else 0
-                    pools.setdefault(wallet_addr, []).append({
-                        'lot_id': next_lot_id('2025_mint'),
-                        'date': tx_date,
-                        'symbol': token.upper(),
-                        'volume': amount,
-                        'price': price_per,
-                        'total': total_usd,
-                        'source': '2025_mint',
-                    })
-
     return pools
 
 
-def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', consume=False):
+def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', consume=False, as_of_date=None):
     """Match lots from a pre-built virtual pool for a sold token using LIFO or FIFO.
 
     pool_lots: list of lot dicts from the wallet's virtual pool
     consume: if True, mutate pool_lots in-place (reduce volumes, remove exhausted lots)
+    as_of_date: if provided, only consider lots whose acquisition date <= as_of_date
+        (prevents future lots from satisfying past trades when the pool is built
+        with all-time data).
     Returns (matched_lots, remaining_amount, warning).
     matched_lots: [{'lot_index': str, 'volume_used': float, 'cost_basis': float,
                      'date_acquired': str, 'price': float, 'source': str}]
     """
     symbol_upper = sold_token.upper()
     # Gather matching lots with their pool indices
-    matching = [(i, lot) for i, lot in enumerate(pool_lots) if lot['symbol'].upper() == symbol_upper]
+    matching = [(i, lot) for i, lot in enumerate(pool_lots)
+                if lot['symbol'].upper() == symbol_upper
+                and (as_of_date is None or lot['date'] <= as_of_date)]
     # Sort by date: LIFO = newest first, FIFO = oldest first
     matching.sort(key=lambda x: x[1]['date'], reverse=(method == 'LIFO'))
 
@@ -3426,112 +3492,63 @@ def _process_transfers(state):
 
 
 def _run_reconcile_all(state):
-    """Shared logic for auto-reconciling all trades using virtual lot pools.
+    """Auto-reconcile all trades via a single chronological pass over events.
 
-    Builds virtual lot pools for all wallets, then processes trades chronologically.
-    The pool already accounts for transfers carrying cost basis between wallets.
+    The pool is built incrementally; trade reconciliation happens at the moment
+    each TRADE event is encountered, so it sees the pool exactly as it stood at
+    that point in time (including transfers in but excluding future transfers
+    that would later drain the lots).
     """
-    transactions = state.get('transactions', {})
     classifications = state.get('classifications', {})
     reconciliations = state.get('reconciliations', {})
     method = state.get('cost_basis_method', 'LIFO')
 
-    # Collect all reconcilable trades across wallets
-    all_trades = []
-    for wid, txs in transactions.items():
-        wallet = next((w for w in state['wallets'] if w['id'] == wid), None)
-        if not wallet:
-            continue
-        for i, tx in enumerate(txs):
-            recon_key = f"{wid}_{i}"
-            if recon_key in reconciliations:
-                continue
-
-            tx_type = tx.get('type', '').upper()
-            details = tx.get('parsed_details', {})
-            sent = details.get('sent', [])
-            received = details.get('received', [])
-
-            if tx_type == 'TRADE':
-                sold_token = sent[0].get('token', '') if sent else ''
-                # Skip Buys (USD on sent side) and Migrations (non-taxable rebrand)
-                if sold_token.upper() == 'USD':
-                    continue
-                if any(classifications.get(f"{wid}_{i}_{idx}") == 'Migration' for idx in range(len(sent))):
-                    continue
-                try:
-                    sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token) if sent else 0
-                except (ValueError, TypeError):
-                    continue
-                proceeds = get_trade_proceeds(tx)
-            elif tx_type == 'MINT':
-                has_payment = any(classifications.get(f"{wid}_{i}_{idx}") in ('Payment', 'LP Deposit')
-                                  for idx, _ in enumerate(sent))
-                if not has_payment:
-                    continue
-                sold_token = sent[0].get('token', '') if sent else ''
-                try:
-                    total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
-                    total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
-                except (ValueError, TypeError):
-                    continue
-                sold_amount = total_sent - total_refund
-                try:
-                    sent_usd = sum(abs(float(s.get('usd_value', '0').replace('$','').replace(',',''))) for s in sent if s.get('token') == sold_token)
-                    refund_usd = sum(abs(float(r.get('usd_value', '0').replace('$','').replace(',',''))) for r in received if r.get('token') == sold_token)
-                except (ValueError, TypeError):
-                    continue
-                proceeds = sent_usd - refund_usd
-            else:
-                continue
-
-            if sold_amount <= 0:
-                continue
-
-            all_trades.append({
-                'wid': wid,
-                'tx_index': i,
-                'recon_key': recon_key,
-                'wallet': wallet,
-                'date': tx.get('date', ''),
-                'sold_token': sold_token,
-                'sold_amount': sold_amount,
-                'proceeds': proceeds,
-            })
-
-    # Sort trades chronologically so lot consumption is in order
-    all_trades.sort(key=lambda x: x['date'])
-
-    # Build pools fresh for reconciliation — skip trade sold-side consumption
-    # so _run_reconcile_all can consume them in chronological order
-    recon_pools = build_wallet_lot_pools(state, method, skip_trade_consumption=True)
-
-    for trade in all_trades:
-        wallet_addr = trade['wallet']['address'].lower()
-        wallet_pool = recon_pools.get(wallet_addr, [])
-
-        matched_lots, remaining, warning = lifo_match_from_pool(
-            wallet_pool, trade['sold_token'], trade['sold_amount'], method=method, consume=True)
-
-        dust_tol = max(1e-9, trade['sold_amount'] * 0.0000001)
+    def trade_cb(wid, ti, tx, wallet_pool, m):
+        recon_key = f"{wid}_{ti}"
+        if recon_key in reconciliations:
+            return
+        details = tx.get('parsed_details', {})
+        sent = details.get('sent', [])
+        if not sent:
+            return
+        sold_token = sent[0].get('token', '')
+        # Skip Buys (USD on sent side) and Migrations (non-taxable rebrand)
+        if sold_token.upper() == 'USD':
+            return
+        if any(classifications.get(f"{wid}_{ti}_{idx}") == 'Migration' for idx in range(len(sent))):
+            return
+        try:
+            sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
+        except (ValueError, TypeError):
+            return
+        if sold_amount <= 0:
+            return
+        proceeds = get_trade_proceeds(tx)
+        matched_lots, remaining, _ = lifo_match_from_pool(
+            wallet_pool, sold_token, sold_amount, method=m, consume=False)
+        dust_tol = max(1e-9, sold_amount * 0.0000001)
         if matched_lots and remaining < dust_tol:
-            total_cost_basis = sum(m['cost_basis'] for m in matched_lots)
-            gain_loss = trade['proceeds'] - total_cost_basis
-            terms = [determine_term(m['date_acquired'], trade['date']) for m in matched_lots]
+            total_cost_basis = sum(mm['cost_basis'] for mm in matched_lots)
+            trade_date = tx.get('date', '')
+            gain_loss = proceeds - total_cost_basis
+            terms = [determine_term(mm['date_acquired'], trade_date) for mm in matched_lots]
             if all(t == 'long' for t in terms):
                 overall_term = 'long'
             elif all(t == 'short' for t in terms):
                 overall_term = 'short'
             else:
                 overall_term = 'mixed'
-
-            reconciliations[trade['recon_key']] = {
+            reconciliations[recon_key] = {
                 'lots_used': matched_lots,
-                'proceeds': trade['proceeds'],
+                'proceeds': proceeds,
                 'gain_loss': gain_loss,
                 'term': overall_term,
                 'status': 'matched',
             }
+
+    # Single chronological pass: the trade callback fires before the trade's
+    # consumption/add, so it sees the pool's state at that moment.
+    build_wallet_lot_pools(state, method, trade_callback=trade_cb)
 
     state['reconciliations'] = reconciliations
     save_state(state)
