@@ -3768,7 +3768,7 @@ def build_form8949_pages(template_path, rows, page_prefix, checkbox_index, name_
     return pages
 
 
-@app.route('/reports/form8949-pdf')
+@app.route('/reports/form8949-pdf', methods=['GET', 'POST'])
 def form8949_pdf():
     state = ensure_state()
     rows = build_form8949_rows(state)
@@ -3779,9 +3779,9 @@ def form8949_pdf():
     tax_year = state.get('tax_year', DEFAULT_TAX_YEAR)
     template_path = os.path.join(os.path.dirname(__file__), 'data', 'f8949.pdf')
 
-    # Get name and SSN from query params (not stored)
-    name_value = request.args.get('name', '').strip()
-    ssn_value = request.args.get('ssn', '').strip()
+    # Name/SSN from request body (POST) or query (GET); not stored. POST keeps SSN out of access logs.
+    name_value = request.values.get('name', '').strip()
+    ssn_value = request.values.get('ssn', '').strip()
 
     # Build pages for short-term (Part I, page 1 template, check box C = index 2)
     # and long-term (Part II, page 2 template, check box F = index 2)
@@ -3900,7 +3900,7 @@ def build_form8949_summary_pdf(template_path, short_totals, long_totals, name_va
     return output.getvalue()
 
 
-@app.route('/reports/form8949-summary-pdf')
+@app.route('/reports/form8949-summary-pdf', methods=['GET', 'POST'])
 def form8949_summary_pdf():
     state = ensure_state()
     rows = build_form8949_rows(state)
@@ -3908,8 +3908,8 @@ def form8949_summary_pdf():
     tax_year = state.get('tax_year', DEFAULT_TAX_YEAR)
     template_path = os.path.join(os.path.dirname(__file__), 'data', 'f8949.pdf')
 
-    name_value = request.args.get('name', '').strip()
-    ssn_value = request.args.get('ssn', '').strip()
+    name_value = request.values.get('name', '').strip()
+    ssn_value = request.values.get('ssn', '').strip()
 
     short_term = [r for r in rows if r['term'] == 'short']
     long_term = [r for r in rows if r['term'] == 'long']

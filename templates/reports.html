@@ -157,7 +157,7 @@
     <div style="background:#fff; border-radius:8px; padding:24px; min-width:340px; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
         <h3 style="margin:0 0 8px 0;">Generate Form 8949 Summary PDF</h3>
         <p style="margin:0 0 16px 0; font-size:0.85em; color:#666;">Two-page form with totals only. Attach the CSV as a statement.</p>
-        <form action="{{ url_for('form8949_summary_pdf') }}" method="get" target="_blank">
+        <form action="{{ url_for('form8949_summary_pdf') }}" method="post" target="_blank">
             <div style="margin-bottom:12px;">
                 <label style="display:block; font-size:0.9em; color:#555; margin-bottom:4px;">Name (optional)</label>
                 <input type="text" name="name" placeholder="e.g., Adam Kraft" style="width:100%; padding:8px 12px; border:1px solid #ddd; border-radius:6px; font-size:1em;">
@@ -178,7 +178,7 @@
 <div id="pdf-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
     <div style="background:#fff; border-radius:8px; padding:24px; min-width:340px; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
         <h3 style="margin:0 0 16px 0;">Generate Form 8949 PDF</h3>
-        <form action="{{ url_for('form8949_pdf') }}" method="get" target="_blank">
+        <form action="{{ url_for('form8949_pdf') }}" method="post" target="_blank">
             <div style="margin-bottom:12px;">
                 <label style="display:block; font-size:0.9em; color:#555; margin-bottom:4px;">Name (optional)</label>
                 <input type="text" name="name" placeholder="e.g., Adam Kraft" style="width:100%; padding:8px 12px; border:1px solid #ddd; border-radius:6px; font-size:1em;">
