@@ -3831,6 +3831,116 @@ def form8949_pdf():
     )
 
 
+def _fill_summary_page(page, page_prefix, checkbox_index, name_value, ssn_value, totals):
+    """Fill a single Form 8949 page with name/SSN, checkbox, and one summary row."""
+    fill_pdf_field(page, f'f{page_prefix}_01[0]', name_value)
+    fill_pdf_field(page, f'f{page_prefix}_02[0]', ssn_value)
+    fill_pdf_field(page, f'c{page_prefix}_1[{checkbox_index}]', '', is_checkbox=True)
+
+    if not totals:
+        return
+
+    proceeds = totals.get('proceeds', 0)
+    cost_basis = totals.get('cost_basis', 0)
+    gain_loss = totals.get('gain_loss', 0)
+
+    # Single summary row in the first data slot (fields f{p}_03 through f{p}_10).
+    # IRS pattern: description "See attached statement", dates "Various".
+    col_values = [
+        'See attached statement',
+        'Various',
+        'Various',
+        f"{proceeds:.2f}",
+        f"{cost_basis:.2f}",
+        '',
+        '',
+        f"{gain_loss:.2f}",
+    ]
+    for col_idx, val in enumerate(col_values):
+        field_num = 3 + col_idx
+        fill_pdf_field(page, f'f{page_prefix}_{field_num:02d}[0]', val)
+
+    # Totals row at bottom of page mirrors the single summary row.
+    fill_pdf_field(page, f'f{page_prefix}_91[0]', f"{proceeds:.2f}")
+    fill_pdf_field(page, f'f{page_prefix}_92[0]', f"{cost_basis:.2f}")
+    fill_pdf_field(page, f'f{page_prefix}_93[0]', '')
+    fill_pdf_field(page, f'f{page_prefix}_94[0]', '0.00')
+    fill_pdf_field(page, f'f{page_prefix}_95[0]', f"{gain_loss:.2f}")
+
+
+def build_form8949_summary_pdf(template_path, short_totals, long_totals, name_value, ssn_value):
+    """Build a 2-page Form 8949 PDF with summary totals only (TurboTax-style).
+
+    Reads the template exactly once; output is bounded to 2 pages regardless of trade count.
+    """
+    template = pdfrw.PdfReader(template_path)
+
+    page1 = template.pages[0]  # Part I — Short-term
+    page2 = template.pages[1]  # Part II — Long-term
+
+    _fill_summary_page(page1, '1', 2, name_value, ssn_value, short_totals)  # Box C
+    _fill_summary_page(page2, '2', 2, name_value, ssn_value, long_totals)   # Box F
+
+    writer = pdfrw.PdfWriter()
+    writer.addpage(page1)
+    writer.addpage(page2)
+
+    all_fields = []
+    for pg in writer.pagearray:
+        annots = pg['/Annots'] if '/Annots' in pg else None
+        if annots:
+            all_fields.extend(annots)
+    writer.trailer.Root.AcroForm = pdfrw.PdfDict(
+        Fields=all_fields,
+        NeedAppearances=pdfrw.PdfObject('true'),
+    )
+
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+@app.route('/reports/form8949-summary-pdf')
+def form8949_summary_pdf():
+    state = ensure_state()
+    rows = build_form8949_rows(state)
+
+    tax_year = state.get('tax_year', DEFAULT_TAX_YEAR)
+    template_path = os.path.join(os.path.dirname(__file__), 'data', 'f8949.pdf')
+
+    name_value = request.args.get('name', '').strip()
+    ssn_value = request.args.get('ssn', '').strip()
+
+    short_term = [r for r in rows if r['term'] == 'short']
+    long_term = [r for r in rows if r['term'] == 'long']
+
+    short_totals = None
+    if short_term:
+        short_totals = {
+            'proceeds': sum(r['proceeds'] for r in short_term),
+            'cost_basis': sum(r['cost_basis'] for r in short_term),
+            'gain_loss': sum(r['gain_loss'] for r in short_term),
+        }
+
+    long_totals = None
+    if long_term:
+        long_totals = {
+            'proceeds': sum(r['proceeds'] for r in long_term),
+            'cost_basis': sum(r['cost_basis'] for r in long_term),
+            'gain_loss': sum(r['gain_loss'] for r in long_term),
+        }
+
+    pdf_bytes = build_form8949_summary_pdf(template_path, short_totals, long_totals, name_value, ssn_value)
+
+    return Response(
+        pdf_bytes,
+        mimetype='application/pdf',
+        headers={
+            'Content-Disposition': f'attachment; filename=form8949_summary_{tax_year}.pdf',
+        },
+    )
+
+
 @app.route('/reports/income-csv')
 def income_csv():
     state = ensure_state()
