@@ -2181,7 +2181,28 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
 
         # Phase 0: TRADE/MINT received-side adds only.
         if event.get('kind') == 'trade_recv_add':
+            sent = details.get('sent', [])
             received = details.get('received', [])
+            # When the sent side has a reliably-priced token (ETH/WETH/BTC/stable)
+            # and the received side doesn't, the sent-side USD is a much better
+            # estimate of the trade's economic value than the received side's
+            # (which can be wildly inflated for illiquid tokens). Use it as the
+            # cost basis source for the received lots, split proportionally.
+            sent_total_usd = 0.0
+            recv_total_usd = 0.0
+            for it in sent:
+                usd = it.get('usd_value', '') or it.get('pretty_usd', '')
+                if isinstance(usd, str): usd = usd.replace('$', '').replace(',', '').strip()
+                try: sent_total_usd += abs(float(usd))
+                except (ValueError, TypeError): pass
+            for it in received:
+                usd = it.get('usd_value', '') or it.get('pretty_usd', '')
+                if isinstance(usd, str): usd = usd.replace('$', '').replace(',', '').strip()
+                try: recv_total_usd += abs(float(usd))
+                except (ValueError, TypeError): pass
+            sent_has_reliable = any((it.get('token') or '').upper() in RELIABLE_PRICED_TOKENS for it in sent)
+            recv_has_reliable = any((it.get('token') or '').upper() in RELIABLE_PRICED_TOKENS for it in received)
+            use_sent_basis = sent_has_reliable and not recv_has_reliable and sent_total_usd > 0
             for ii, item in enumerate(received):
                 token = item.get('token', '')
                 amount = _parse_amount(item)
@@ -2189,7 +2210,12 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     continue
                 if token.upper() == 'USD':
                     continue
-                total_usd = _parse_usd_value(item)
+                item_usd = _parse_usd_value(item)
+                if use_sent_basis and recv_total_usd > 0:
+                    # Allocate the sent-side total proportionally across received items
+                    total_usd = sent_total_usd * (item_usd / recv_total_usd)
+                else:
+                    total_usd = item_usd
                 price_per = total_usd / amount if amount > 0 else 0
                 if token.upper() in STABLECOINS:
                     price_per = 1.0
