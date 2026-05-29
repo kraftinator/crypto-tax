@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Inspect IRS Form 8949 PDF fields using pdfrw."""
 
+import os
 import pdfrw
+
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'f8949.pdf')
+
 
 def decode_field_name(name):
     """Decode a PDF field name, handling UTF-16 encoding."""
@@ -22,7 +26,7 @@ def decode_field_name(name):
 
 
 def main():
-    template = pdfrw.PdfReader('/home/adam/Projects/crypto-tax/data/f8949.pdf')
+    template = pdfrw.PdfReader(TEMPLATE_PATH)
 
     print(f"Number of pages: {len(template.pages)}")
     print()
