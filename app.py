@@ -10,6 +10,9 @@ import pdfrw
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
+from storage import db
+from storage.compat import load_state_dict
+
 _state_lock = threading.RLock()
 
 app = Flask(__name__)
@@ -19,7 +22,15 @@ app.config['DATA_FILE'] = 'data/state.json'
 DEFAULT_TAX_YEAR = 2025
 
 def load_state():
-    """Load state from state.json if it exists."""
+    """Load state, preferring SQLite (tax_<year>.db) over the legacy JSON file.
+
+    Phase 1 compat shim: reads from the year DB if present and reassembles
+    the same dict shape routes expect. Falls back to state.json so master
+    and feature/sqlite-migration can both work against the same data while
+    the migration is in progress. `save_state` still writes JSON.
+    """
+    if os.path.exists(db.year_db_path(DEFAULT_TAX_YEAR)):
+        return load_state_dict(DEFAULT_TAX_YEAR)
     if os.path.exists(app.config['DATA_FILE']):
         with open(app.config['DATA_FILE'], 'r') as f:
             return json.load(f)
