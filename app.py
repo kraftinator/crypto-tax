@@ -104,15 +104,16 @@ def save_state(data):
 
 @app.route('/backup', methods=['POST'])
 def backup():
-    """Create a timestamped backup of state.json."""
+    """Snapshot the active year's DB into data/backups/ with a timestamp."""
     import shutil
-    src = app.config['DATA_FILE']
+    year = get_active_year()
+    src = db.year_db_path(year)
     if not os.path.exists(src):
-        return jsonify({'ok': False, 'message': 'No state file to backup'})
+        return jsonify({'ok': False, 'message': f'No DB for {year} to back up.'})
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    backup_dir = os.path.join('data', 'backups')
+    backup_dir = os.path.join(db.DATA_DIR, 'backups')
     os.makedirs(backup_dir, exist_ok=True)
-    dst = os.path.join(backup_dir, f'state_{timestamp}.json')
+    dst = os.path.join(backup_dir, f'tax_{year}_{timestamp}.db')
     shutil.copy2(src, dst)
     print(f'[Backup] Created {dst}')
     return jsonify({'ok': True, 'file': dst})
@@ -1090,6 +1091,33 @@ def fill_missing_usd_values(transactions, state):
     infer_prices_from_trades(transactions)
 
     return transactions
+
+
+_SAFE_ARCHIVE_ENDPOINTS = {'switch_year', 'backup', 'static'}
+
+
+@app.before_request
+def _block_archive_writes():
+    """Prior years are read-only after rollover (design decision #2).
+
+    Allows GETs always, plus a small allowlist of always-safe POSTs.
+    The TAX_YEAR env var bypasses this — that's the deliberate
+    'unlock and edit' escape hatch.
+    """
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return
+    if request.endpoint in _SAFE_ARCHIVE_ENDPOINTS:
+        return
+    if os.environ.get('TAX_YEAR'):
+        return
+    years = available_years()
+    if years and get_active_year() != years[0]:
+        return (
+            "This tax year is archived (read-only). Switch back to the "
+            "active year to make changes, or relaunch with "
+            "TAX_YEAR=&lt;year&gt; to deliberately edit a prior year.",
+            403,
+        )
 
 
 @app.context_processor
