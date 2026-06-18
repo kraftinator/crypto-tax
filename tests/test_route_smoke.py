@@ -19,6 +19,9 @@ sys.path.insert(0, PROJECT_ROOT)
 # spin up the Werkzeug reloader.
 os.environ.setdefault('FLASK_ENV', 'production')
 
+# Smoke tests target the 2025 dataset (the one we have populated).
+os.environ['TAX_YEAR'] = '2025'
+
 from app import app, load_state  # noqa: E402
 
 

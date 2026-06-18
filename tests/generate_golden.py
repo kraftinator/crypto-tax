@@ -15,6 +15,10 @@ from decimal import Decimal
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, PROJECT_ROOT)
 
+# Goldens are derived from the 2025 dataset; pin the active year so this
+# generator stays correct even when other year DBs exist.
+os.environ['TAX_YEAR'] = '2025'
+
 # Importing app.py registers Flask routes as a side effect. That's fine; we
 # only call the pure functions exported from it.
 from app import (  # noqa: E402

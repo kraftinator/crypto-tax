@@ -17,6 +17,10 @@ import unittest
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, PROJECT_ROOT)
 
+# Goldens were captured against 2025 data; pin the active year so this test
+# stays correct even after a 2026 year DB exists.
+os.environ['TAX_YEAR'] = '2025'
+
 from app import (  # noqa: E402
     load_state,
     build_form8949_rows,

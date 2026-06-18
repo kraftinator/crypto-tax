@@ -21,29 +21,66 @@ app.config['DATA_FILE'] = 'data/state.json'
 
 DEFAULT_TAX_YEAR = 2025
 
-def load_state():
-    """Load state, preferring SQLite (tax_<year>.db) over the legacy JSON file.
 
-    Phase 1 compat shim: reads from the year DB if present and reassembles
-    the same dict shape routes expect. Falls back to state.json so master
-    and feature/sqlite-migration can both work against the same data while
-    the migration is in progress. `save_state` still writes JSON.
+def get_active_year():
+    """Pick which tax year the app is operating against this request.
+
+    Resolution, highest priority first:
+      1. The TAX_YEAR env var, if it parses as int.
+      2. The newest tax_<year>.db file present in data/.
+      3. DEFAULT_TAX_YEAR as a last resort.
     """
-    if os.path.exists(db.year_db_path(DEFAULT_TAX_YEAR)):
-        return load_state_dict(DEFAULT_TAX_YEAR)
+    env_year = os.environ.get('TAX_YEAR')
+    if env_year:
+        try:
+            return int(env_year)
+        except ValueError:
+            pass
+
+    import glob
+    pattern = os.path.join(db.DATA_DIR, 'tax_*.db')
+    years = []
+    for path in glob.glob(pattern):
+        name = os.path.basename(path)
+        try:
+            years.append(int(name[len('tax_'):-len('.db')]))
+        except ValueError:
+            pass
+    if years:
+        return max(years)
+
+    return DEFAULT_TAX_YEAR
+
+
+def active_year_db_path():
+    return db.year_db_path(get_active_year())
+
+
+# At startup, make sure the active year DB and the shared DB exist with
+# schema so the first request doesn't see an empty file.
+db.bootstrap_year_db(get_active_year())
+db.bootstrap_shared_db()
+
+
+def load_state():
+    """Load state, preferring SQLite (tax_<year>.db) over legacy JSON.
+
+    Reads from the active year's DB (see `get_active_year`) and reassembles
+    the same dict shape routes expect. Still falls back to state.json if no
+    year DB exists yet, so the app stays runnable on a clean checkout.
+    """
+    year = get_active_year()
+    if os.path.exists(db.year_db_path(year)):
+        return load_state_dict(year)
     if os.path.exists(app.config['DATA_FILE']):
         with open(app.config['DATA_FILE'], 'r') as f:
             return json.load(f)
     return None
 
-def save_state(data):
-    """Persist state to SQLite (Phase 2 dump-and-replace).
 
-    Wraps `storage.compat.save_state_dict` so existing routes can keep
-    calling `save_state(state)` unchanged. Per-mutation writes come in
-    Phase 3 when routes start using table-level accessors.
-    """
-    year = data.get('tax_year', DEFAULT_TAX_YEAR)
+def save_state(data):
+    """Persist state to the active year's DB (Phase 2 dump-and-replace)."""
+    year = data.get('tax_year', get_active_year())
     save_state_dict(data, year)
 
 @app.route('/backup', methods=['POST'])
@@ -67,7 +104,7 @@ def ensure_state():
     if state is None:
         state = {}
     if 'tax_year' not in state:
-        state['tax_year'] = DEFAULT_TAX_YEAR
+        state['tax_year'] = get_active_year()
     if 'wallets' not in state:
         state['wallets'] = []
     if 'transactions' not in state:
@@ -83,10 +120,9 @@ def ensure_state():
     return state
 
 def get_tax_year():
-    state = load_state()
-    if state and 'tax_year' in state:
-        return state['tax_year']
-    return DEFAULT_TAX_YEAR
+    # Active year is authoritative — env var / newest tax_<year>.db file.
+    return get_active_year()
+
 
 def get_configured_addresses(state):
     """Get all configured wallet addresses (lowercased)."""
@@ -1070,7 +1106,7 @@ def upload():
 
 @app.route('/positions')
 def positions():
-    with db.connect(db.year_db_path(DEFAULT_TAX_YEAR)) as conn:
+    with db.connect(active_year_db_path()) as conn:
         positions_list = repo_year.list_positions(conn)
         filename = repo_year.get_meta(conn, 'filename', '')
     if not positions_list:
@@ -1108,7 +1144,7 @@ def reupload_positions():
 @app.route('/api/positions')
 def api_positions():
     """JSON endpoint for positions (for client-side filtering)."""
-    with db.connect(db.year_db_path(DEFAULT_TAX_YEAR)) as conn:
+    with db.connect(active_year_db_path()) as conn:
         positions = repo_year.list_positions(conn)
     symbol = request.args.get('symbol', '').strip()
     if symbol:
@@ -1588,7 +1624,7 @@ def build_parent_summary(tx, line_items):
 @app.route('/wallets/<wallet_id>')
 def wallet_detail(wallet_id):
     # Phase 3c: targeted repo reads instead of loading the whole 17k-tx dict.
-    with db.connect(db.year_db_path(DEFAULT_TAX_YEAR)) as conn:
+    with db.connect(active_year_db_path()) as conn:
         wallet = repo_year.get_wallet(conn, wallet_id)
         if not wallet:
             return redirect(url_for('wallets'))
