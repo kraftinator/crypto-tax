@@ -11,7 +11,7 @@ from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
 from storage import db
-from storage.compat import load_state_dict
+from storage.compat import load_state_dict, save_state_dict
 
 _state_lock = threading.RLock()
 
@@ -37,13 +37,14 @@ def load_state():
     return None
 
 def save_state(data):
-    """Save state atomically: write to a temp file then rename."""
-    path = app.config['DATA_FILE']
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
-    with open(tmp, 'w') as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    """Persist state to SQLite (Phase 2 dump-and-replace).
+
+    Wraps `storage.compat.save_state_dict` so existing routes can keep
+    calling `save_state(state)` unchanged. Per-mutation writes come in
+    Phase 3 when routes start using table-level accessors.
+    """
+    year = data.get('tax_year', DEFAULT_TAX_YEAR)
+    save_state_dict(data, year)
 
 @app.route('/backup', methods=['POST'])
 def backup():

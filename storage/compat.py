@@ -1,10 +1,11 @@
-"""Compatibility shim — assemble the legacy state.json dict shape from SQLite.
+"""Compatibility shim — bridge the legacy state.json dict shape and SQLite.
 
-Phase 1 of the SQLite migration leaves all route code unchanged. Routes still
-do `state = load_state()` and treat `state` as a dict. Internally,
-`load_state()` now calls `load_state_dict()` here instead of parsing JSON.
+Phase 1/2 of the migration leaves all route code unchanged. Routes still
+do `state = load_state()` / `save_state(state)` and treat `state` as a
+single dict. Internally, those calls now go through `load_state_dict()`
+and `save_state_dict()` here.
 
-When all routes have been moved to repo-level accessors (Phase 3), this
+When all routes have been moved to per-table accessors (Phase 3), this
 module goes away.
 """
 import json
@@ -12,6 +13,12 @@ import os
 from collections import defaultdict
 
 from storage import db
+
+
+_YEAR_TABLES_FOR_WIPE = (
+    'reconciliations', 'positions', 'classifications',
+    'transactions', 'wallets', 'meta',
+)
 
 
 def load_state_dict(year):
@@ -81,3 +88,103 @@ def load_state_dict(year):
                 state['price_cache'][r['cache_key']] = r['price']
 
     return state
+
+
+def save_state_dict(state, year):
+    """Persist a whole state dict to SQLite. Replaces every row.
+
+    Phase 2 dump-and-replace: matches the existing 'load → mutate → save'
+    code idiom one-for-one. Per-mutation writes come in Phase 3, when
+    routes stop passing the whole dict around.
+    """
+    year_path = db.bootstrap_year_db(year)
+    shared_path = db.bootstrap_shared_db()
+
+    with db.connect(year_path) as ydb:
+        ydb.execute("BEGIN")
+        try:
+            for tbl in _YEAR_TABLES_FOR_WIPE:
+                ydb.execute(f"DELETE FROM {tbl}")
+
+            # ---- meta -------------------------------------------------
+            for k in ('tax_year', 'cost_basis_method', 'filename'):
+                if k in state:
+                    ydb.execute(
+                        "INSERT INTO meta(key, value) VALUES (?, ?)",
+                        (k, json.dumps(state[k])),
+                    )
+            if 'known_addresses' in state:
+                ydb.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    ('known_addresses', json.dumps(state['known_addresses'])),
+                )
+
+            # ---- wallets ----------------------------------------------
+            for i, w in enumerate(state.get('wallets', [])):
+                ydb.execute(
+                    "INSERT INTO wallets(id, sort_order, data) VALUES (?, ?, ?)",
+                    (w['id'], i, json.dumps(w)),
+                )
+
+            # ---- transactions ----------------------------------------
+            for wallet_id, txs in state.get('transactions', {}).items():
+                for tx_index, tx in enumerate(txs):
+                    ydb.execute(
+                        "INSERT INTO transactions(wallet_id, tx_index, date, type, data) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            wallet_id,
+                            tx_index,
+                            tx.get('date'),
+                            tx.get('type'),
+                            json.dumps(tx),
+                        ),
+                    )
+
+            # ---- classifications --------------------------------------
+            for key, value in state.get('classifications', {}).items():
+                ydb.execute(
+                    "INSERT INTO classifications(key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+
+            # ---- positions --------------------------------------------
+            for i, p in enumerate(state.get('positions', [])):
+                ydb.execute(
+                    "INSERT INTO positions(pos_index, data) VALUES (?, ?)",
+                    (i, json.dumps(p)),
+                )
+
+            # ---- reconciliations --------------------------------------
+            for key, recon in state.get('reconciliations', {}).items():
+                parts = key.split('_')
+                wid = parts[0]
+                try:
+                    tx_idx = int(parts[1])
+                except (IndexError, ValueError):
+                    tx_idx = -1
+                ydb.execute(
+                    "INSERT INTO reconciliations(recon_key, wallet_id, tx_index, data) "
+                    "VALUES (?, ?, ?, ?)",
+                    (key, wid, tx_idx, json.dumps(recon)),
+                )
+
+            ydb.execute("COMMIT")
+        except Exception:
+            ydb.execute("ROLLBACK")
+            raise
+
+    # ---- shared.db: price_cache ---------------------------------------
+    with db.connect(shared_path) as sdb:
+        sdb.execute("BEGIN")
+        try:
+            sdb.execute("DELETE FROM price_cache")
+            for key, price in state.get('price_cache', {}).items():
+                sdb.execute(
+                    "INSERT INTO price_cache(cache_key, price) VALUES (?, ?)",
+                    (key, price),
+                )
+            sdb.execute("COMMIT")
+        except Exception:
+            sdb.execute("ROLLBACK")
+            raise
