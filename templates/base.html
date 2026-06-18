@@ -191,7 +191,22 @@
 </head>
 <body>
     <div class="container">
-        <h1>Crypto Tax Calculator <span style="font-size:0.5em;color:#888;">TY {{ tax_year }}</span></h1>
+        <div style="display:flex; align-items:baseline; gap:1em; flex-wrap:wrap;">
+            <h1 style="margin:0;">Crypto Tax Calculator
+                <span style="font-size:0.5em;color:#888;">TY {{ tax_year }}{% if is_archive_year %} <span style="color:#b45309;">(archive)</span>{% endif %}</span>
+            </h1>
+            {% if available_years|length > 1 %}
+            <form method="post" action="{{ url_for('switch_year') }}" style="margin:0;">
+                <label style="font-size:0.85em; color:#555;">Year:
+                    <select name="year" onchange="this.form.submit()" style="padding:4px 8px; font-size:0.9em; border:1px solid #ddd; border-radius:4px;">
+                        {% for y in available_years %}
+                        <option value="{{ y }}" {% if y == tax_year %}selected{% endif %}>{{ y }}{% if loop.first %} (active){% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+            </form>
+            {% endif %}
+        </div>
         <nav class="nav">
             <a href="{{ url_for('positions') }}" class="{% if active_nav == 'positions' %}active{% endif %}">Opening Positions</a>
             <a href="{{ url_for('wallets') }}" class="{% if active_nav == 'wallets' %}active{% endif %}">Wallets</a>

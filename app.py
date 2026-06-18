@@ -10,6 +10,9 @@ import pdfrw
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
+from storage import db, repo_year, repo_shared
+from storage.compat import load_state_dict, save_state_dict
+
 _state_lock = threading.RLock()
 
 app = Flask(__name__)
@@ -17,34 +20,100 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['DATA_FILE'] = 'data/state.json'
 
 DEFAULT_TAX_YEAR = 2025
+YEAR_COOKIE = 'tax_year'
+
+
+def available_years():
+    """Years for which a tax_<year>.db file exists, newest first."""
+    import glob
+    pattern = os.path.join(db.DATA_DIR, 'tax_*.db')
+    years = []
+    for path in glob.glob(pattern):
+        name = os.path.basename(path)
+        try:
+            years.append(int(name[len('tax_'):-len('.db')]))
+        except ValueError:
+            pass
+    return sorted(years, reverse=True)
+
+
+def get_active_year():
+    """Pick which tax year the app is operating against this request.
+
+    Resolution, highest priority first:
+      1. The TAX_YEAR env var, if it parses as int.
+      2. A tax_year cookie set by the year-selector dropdown.
+      3. The newest tax_<year>.db file present in data/.
+      4. DEFAULT_TAX_YEAR as a last resort.
+    """
+    env_year = os.environ.get('TAX_YEAR')
+    if env_year:
+        try:
+            return int(env_year)
+        except ValueError:
+            pass
+
+    from flask import has_request_context, request
+    if has_request_context():
+        cookie_year = request.cookies.get(YEAR_COOKIE)
+        if cookie_year:
+            try:
+                year = int(cookie_year)
+                if os.path.exists(db.year_db_path(year)):
+                    return year
+            except ValueError:
+                pass
+
+    years = available_years()
+    if years:
+        return years[0]
+
+    return DEFAULT_TAX_YEAR
+
+
+def active_year_db_path():
+    return db.year_db_path(get_active_year())
+
+
+# At startup, make sure the active year DB and the shared DB exist with
+# schema so the first request doesn't see an empty file.
+db.bootstrap_year_db(get_active_year())
+db.bootstrap_shared_db()
+
 
 def load_state():
-    """Load state from state.json if it exists."""
+    """Load state, preferring SQLite (tax_<year>.db) over legacy JSON.
+
+    Reads from the active year's DB (see `get_active_year`) and reassembles
+    the same dict shape routes expect. Still falls back to state.json if no
+    year DB exists yet, so the app stays runnable on a clean checkout.
+    """
+    year = get_active_year()
+    if os.path.exists(db.year_db_path(year)):
+        return load_state_dict(year)
     if os.path.exists(app.config['DATA_FILE']):
         with open(app.config['DATA_FILE'], 'r') as f:
             return json.load(f)
     return None
 
+
 def save_state(data):
-    """Save state atomically: write to a temp file then rename."""
-    path = app.config['DATA_FILE']
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
-    with open(tmp, 'w') as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    """Persist state to the active year's DB (Phase 2 dump-and-replace)."""
+    year = data.get('tax_year', get_active_year())
+    save_state_dict(data, year)
 
 @app.route('/backup', methods=['POST'])
 def backup():
-    """Create a timestamped backup of state.json."""
+    """Snapshot the active year's DB into data/backups/ with a timestamp."""
     import shutil
-    src = app.config['DATA_FILE']
+    year = get_active_year()
+    src = db.year_db_path(year)
     if not os.path.exists(src):
-        return jsonify({'ok': False, 'message': 'No state file to backup'})
+        return jsonify({'ok': False, 'message': f'No DB for {year} to back up.'})
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    backup_dir = os.path.join('data', 'backups')
+    backup_dir = os.path.join(db.DATA_DIR, 'backups')
     os.makedirs(backup_dir, exist_ok=True)
-    dst = os.path.join(backup_dir, f'state_{timestamp}.json')
+    dst = os.path.join(backup_dir, f'tax_{year}_{timestamp}.db')
     shutil.copy2(src, dst)
     print(f'[Backup] Created {dst}')
     return jsonify({'ok': True, 'file': dst})
@@ -55,7 +124,7 @@ def ensure_state():
     if state is None:
         state = {}
     if 'tax_year' not in state:
-        state['tax_year'] = DEFAULT_TAX_YEAR
+        state['tax_year'] = get_active_year()
     if 'wallets' not in state:
         state['wallets'] = []
     if 'transactions' not in state:
@@ -71,10 +140,9 @@ def ensure_state():
     return state
 
 def get_tax_year():
-    state = load_state()
-    if state and 'tax_year' in state:
-        return state['tax_year']
-    return DEFAULT_TAX_YEAR
+    # Active year is authoritative — env var / newest tax_<year>.db file.
+    return get_active_year()
+
 
 def get_configured_addresses(state):
     """Get all configured wallet addresses (lowercased)."""
@@ -1025,10 +1093,57 @@ def fill_missing_usd_values(transactions, state):
     return transactions
 
 
+_SAFE_ARCHIVE_ENDPOINTS = {'switch_year', 'backup', 'static'}
+
+
+@app.before_request
+def _block_archive_writes():
+    """Prior years are read-only after rollover (design decision #2).
+
+    Allows GETs always, plus a small allowlist of always-safe POSTs.
+    The TAX_YEAR env var bypasses this — that's the deliberate
+    'unlock and edit' escape hatch.
+    """
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return
+    if request.endpoint in _SAFE_ARCHIVE_ENDPOINTS:
+        return
+    if os.environ.get('TAX_YEAR'):
+        return
+    years = available_years()
+    if years and get_active_year() != years[0]:
+        return (
+            "This tax year is archived (read-only). Switch back to the "
+            "active year to make changes, or relaunch with "
+            "TAX_YEAR=&lt;year&gt; to deliberately edit a prior year.",
+            403,
+        )
+
+
 @app.context_processor
 def inject_globals():
-    """Inject tax_year into all templates."""
-    return {'tax_year': get_tax_year()}
+    """Inject tax_year and the year-selector data into all templates."""
+    years = available_years()
+    active = get_tax_year()
+    return {
+        'tax_year': active,
+        'available_years': years,
+        'is_archive_year': bool(years) and active != years[0],
+    }
+
+
+@app.route('/switch-year', methods=['POST'])
+def switch_year():
+    """Set the active-year cookie from the header dropdown."""
+    year = request.form.get('year', '').strip()
+    if year.isdigit() and int(year) in available_years():
+        resp = redirect(request.referrer or url_for('index'))
+        # 1 year, HttpOnly, lax SameSite (default for redirect/POST forms).
+        resp.set_cookie(YEAR_COOKIE, year, max_age=60 * 60 * 24 * 365,
+                        httponly=True, samesite='Lax')
+        return resp
+    return redirect(request.referrer or url_for('index'))
+
 
 @app.route('/')
 def index():
@@ -1058,12 +1173,14 @@ def upload():
 
 @app.route('/positions')
 def positions():
-    state = load_state()
-    if not state or not state.get('positions'):
+    with db.connect(active_year_db_path()) as conn:
+        positions_list = repo_year.list_positions(conn)
+        filename = repo_year.get_meta(conn, 'filename', '')
+    if not positions_list:
         return redirect(url_for('index'))
-    stats = compute_stats(state['positions'])
-    return render_template('positions.html', positions=state['positions'], stats=stats,
-                           filename=state.get('filename', ''), active_nav='positions')
+    stats = compute_stats(positions_list)
+    return render_template('positions.html', positions=positions_list, stats=stats,
+                           filename=filename, active_nav='positions')
 
 @app.route('/reset', methods=['POST'])
 def reset():
@@ -1094,11 +1211,9 @@ def reupload_positions():
 @app.route('/api/positions')
 def api_positions():
     """JSON endpoint for positions (for client-side filtering)."""
-    state = load_state()
-    if not state:
-        return jsonify([])
+    with db.connect(active_year_db_path()) as conn:
+        positions = repo_year.list_positions(conn)
     symbol = request.args.get('symbol', '').strip()
-    positions = state.get('positions', [])
     if symbol:
         positions = [p for p in positions if p['symbol'].lower() == symbol.lower()]
     return jsonify(positions)
@@ -1575,12 +1690,17 @@ def build_parent_summary(tx, line_items):
 
 @app.route('/wallets/<wallet_id>')
 def wallet_detail(wallet_id):
-    state = ensure_state()
-    wallet = next((w for w in state['wallets'] if w['id'] == wallet_id), None)
-    if not wallet:
-        return redirect(url_for('wallets'))
-    transactions = state.get('transactions', {}).get(wallet_id, [])
-    classifications = state.get('classifications', {})
+    # Phase 3c: targeted repo reads instead of loading the whole 17k-tx dict.
+    with db.connect(active_year_db_path()) as conn:
+        wallet = repo_year.get_wallet(conn, wallet_id)
+        if not wallet:
+            return redirect(url_for('wallets'))
+        transactions = repo_year.list_transactions(conn, wallet_id)
+        classifications = repo_year.classifications_for_wallet(conn, wallet_id)
+        all_wallets = repo_year.list_wallets(conn)
+        known_address_groups = repo_year.get_meta(conn, 'known_addresses', [])
+    # Minimal state dict for the address helpers (they only read these keys).
+    state = {'wallets': all_wallets, 'known_addresses': known_address_groups}
     known_addresses = get_configured_addresses(state)
     addr_map = get_all_known_addresses(state)
 
