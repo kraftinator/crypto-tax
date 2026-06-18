@@ -29,11 +29,6 @@ import sys
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, PROJECT_ROOT)
 
-# Pinning the env var so app.py's get_active_year() doesn't try to pick a
-# year based on what files exist on disk while we're in the middle of
-# creating one. We resolve years explicitly through args.
-os.environ.setdefault('TAX_YEAR', '0')
-
 from storage.compat import load_state_dict, save_state_dict  # noqa: E402
 from storage import db  # noqa: E402
 from app import build_wallet_lot_pools  # noqa: E402

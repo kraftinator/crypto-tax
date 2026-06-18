@@ -20,23 +20,11 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['DATA_FILE'] = 'data/state.json'
 
 DEFAULT_TAX_YEAR = 2025
+YEAR_COOKIE = 'tax_year'
 
 
-def get_active_year():
-    """Pick which tax year the app is operating against this request.
-
-    Resolution, highest priority first:
-      1. The TAX_YEAR env var, if it parses as int.
-      2. The newest tax_<year>.db file present in data/.
-      3. DEFAULT_TAX_YEAR as a last resort.
-    """
-    env_year = os.environ.get('TAX_YEAR')
-    if env_year:
-        try:
-            return int(env_year)
-        except ValueError:
-            pass
-
+def available_years():
+    """Years for which a tax_<year>.db file exists, newest first."""
     import glob
     pattern = os.path.join(db.DATA_DIR, 'tax_*.db')
     years = []
@@ -46,8 +34,39 @@ def get_active_year():
             years.append(int(name[len('tax_'):-len('.db')]))
         except ValueError:
             pass
+    return sorted(years, reverse=True)
+
+
+def get_active_year():
+    """Pick which tax year the app is operating against this request.
+
+    Resolution, highest priority first:
+      1. The TAX_YEAR env var, if it parses as int.
+      2. A tax_year cookie set by the year-selector dropdown.
+      3. The newest tax_<year>.db file present in data/.
+      4. DEFAULT_TAX_YEAR as a last resort.
+    """
+    env_year = os.environ.get('TAX_YEAR')
+    if env_year:
+        try:
+            return int(env_year)
+        except ValueError:
+            pass
+
+    from flask import has_request_context, request
+    if has_request_context():
+        cookie_year = request.cookies.get(YEAR_COOKIE)
+        if cookie_year:
+            try:
+                year = int(cookie_year)
+                if os.path.exists(db.year_db_path(year)):
+                    return year
+            except ValueError:
+                pass
+
+    years = available_years()
     if years:
-        return max(years)
+        return years[0]
 
     return DEFAULT_TAX_YEAR
 
@@ -1075,8 +1094,28 @@ def fill_missing_usd_values(transactions, state):
 
 @app.context_processor
 def inject_globals():
-    """Inject tax_year into all templates."""
-    return {'tax_year': get_tax_year()}
+    """Inject tax_year and the year-selector data into all templates."""
+    years = available_years()
+    active = get_tax_year()
+    return {
+        'tax_year': active,
+        'available_years': years,
+        'is_archive_year': bool(years) and active != years[0],
+    }
+
+
+@app.route('/switch-year', methods=['POST'])
+def switch_year():
+    """Set the active-year cookie from the header dropdown."""
+    year = request.form.get('year', '').strip()
+    if year.isdigit() and int(year) in available_years():
+        resp = redirect(request.referrer or url_for('index'))
+        # 1 year, HttpOnly, lax SameSite (default for redirect/POST forms).
+        resp.set_cookie(YEAR_COOKIE, year, max_age=60 * 60 * 24 * 365,
+                        httponly=True, samesite='Lax')
+        return resp
+    return redirect(request.referrer or url_for('index'))
+
 
 @app.route('/')
 def index():
