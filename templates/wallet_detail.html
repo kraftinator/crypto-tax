@@ -29,11 +29,23 @@
         <a href="{{ url_for('wallets') }}" class="btn btn-sm btn-secondary">Back to Wallets</a>
     </div>
 
+    {% set imported = request.args.get('imported')|int(0) %}
+    {% set skipped  = request.args.get('skipped')|int(0) %}
+    {% if imported or skipped %}
+    <div style="margin:12px 0; padding:10px 14px; background:#e0f2fe; border:1px solid #bae6fd; border-radius:6px;">
+        Imported <strong>{{ imported }}</strong> new transaction{{ '' if imported == 1 else 's' }};
+        skipped <strong>{{ skipped }}</strong> already present.
+    </div>
+    {% endif %}
+
     <div style="margin:16px 0; padding:16px; background:#f9f9f9; border-radius:6px; display:flex; align-items:center; gap:24px; flex-wrap:wrap;">
         <form action="{{ url_for('upload_wallet_csv', wallet_id=wallet.id) }}" method="post" enctype="multipart/form-data"
               style="display:flex; align-items:center; gap:8px;">
             <strong>Upload CSV:</strong>
             <input type="file" name="file" accept=".csv" required>
+            <label style="font-size:0.85em; color:#555; display:flex; align-items:center; gap:4px;">
+                <input type="checkbox" name="replace_all" value="1"> Replace all
+            </label>
             <button type="submit" class="btn btn-sm">Upload</button>
         </form>
         <button type="button" class="btn btn-sm" onclick="document.getElementById('manualTxForm').style.display = document.getElementById('manualTxForm').style.display === 'none' ? 'block' : 'none'">Add Transaction</button>

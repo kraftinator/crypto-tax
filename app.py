@@ -144,6 +144,29 @@ def get_tax_year():
     return get_active_year()
 
 
+def _tx_identity_key(tx):
+    """Stable identity for an imported transaction.
+
+    Used by the wallet CSV upload route to dedupe against rows that are
+    already in the wallet. Prefers tx_hash (always unique for on-chain
+    rows); falls back to a tuple of fields for formats that don't carry
+    a hash (Coinbase, generic CSVs).
+    """
+    h = (tx.get('tx_hash') or '').strip().lower()
+    if h:
+        return ('h', h)
+    return (
+        'c',
+        tx.get('date', ''),
+        (tx.get('type') or '').upper(),
+        str(tx.get('volume', '')),
+        tx.get('symbol', ''),
+        str(tx.get('value', '')),
+        (tx.get('sender') or '').lower(),
+        (tx.get('recipient') or '').lower(),
+    )
+
+
 def get_configured_addresses(state):
     """Get all configured wallet addresses (lowercased)."""
     return set(w['address'].lower() for w in state.get('wallets', []) if w.get('address'))
@@ -1394,8 +1417,20 @@ def remove_known_address():
 
 @app.route('/wallets/upload/<wallet_id>', methods=['POST'])
 def upload_wallet_csv(wallet_id):
+    """Import transactions from a CSV file.
+
+    Default behavior is *incremental*: rows whose identity key
+    (tx_hash, or composite of date/type/volume/symbol/value/sender/recipient)
+    already exists in the wallet are skipped. New rows are appended at the
+    end, preserving existing tx_indexes and therefore every existing
+    classification and reconciliation.
+
+    With `replace_all=1` (a checkbox in the upload form) the wallet's
+    imported rows are wiped first and the CSV becomes the new source of
+    truth. Manual rows (added via the +Add Transaction button) and their
+    classifications are preserved either way.
+    """
     state = ensure_state()
-    # Verify wallet exists
     wallet = next((w for w in state['wallets'] if w['id'] == wallet_id), None)
     if not wallet:
         return redirect(url_for('wallets'))
@@ -1405,63 +1440,85 @@ def upload_wallet_csv(wallet_id):
     if file.filename == '' or not file.filename.endswith('.csv'):
         return redirect(url_for('wallet_detail', wallet_id=wallet_id))
 
+    replace_all = request.form.get('replace_all') == '1'
+
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], f'wallet_{wallet_id}.csv')
     file.save(filepath)
     fmt = detect_csv_format(filepath)
-    print(f"[Upload] Detected CSV format: {fmt}")
+    print(f"[Upload] Detected CSV format: {fmt} (mode: {'replace' if replace_all else 'incremental'})")
     if fmt == 'coinbase':
-        transactions = parse_coinbase_csv(filepath)
+        new_txs = parse_coinbase_csv(filepath)
     elif fmt == 'generic':
-        transactions = parse_generic_csv(filepath)
+        new_txs = parse_generic_csv(filepath)
     else:
-        transactions = parse_wallet_csv(filepath)
-    # Extract auto-classification hints (Coinbase parser only)
-    auto_classifications = {}
-    for i, tx in enumerate(transactions):
+        new_txs = parse_wallet_csv(filepath)
+
+    # Pull auto-classification hints out of each new tx; we'll re-emit them
+    # at the row's final destination index.
+    auto_cls_hints = {}  # source_index -> {item_index: classification}
+    for i, tx in enumerate(new_txs):
         hint = tx.pop('_auto_cls', None)
         if hint:
+            auto_cls_hints[i] = hint
+
+    print(f"[CoinGecko] Scanning {len(new_txs)} transactions for missing USD values...")
+    new_txs = fill_missing_usd_values(new_txs, state)
+
+    state.setdefault('transactions', {}).setdefault(wallet_id, [])
+
+    if replace_all:
+        old_txs = state['transactions'][wallet_id]
+        manual_txs = [tx for tx in old_txs if tx.get('manual')]
+        manual_old_indices = [i for i, tx in enumerate(old_txs) if tx.get('manual')]
+        manual_classifications = {}
+        for old_idx in manual_old_indices:
+            prefix = f"{wallet_id}_{old_idx}_"
+            for k, v in state.get('classifications', {}).items():
+                if k.startswith(prefix):
+                    manual_classifications[(old_idx, k[len(prefix):])] = v
+
+        state['transactions'][wallet_id] = list(new_txs)
+        for k in [k for k in state.get('classifications', {}) if k.startswith(f"{wallet_id}_")]:
+            del state['classifications'][k]
+        for src_i, hint in auto_cls_hints.items():
             for item_idx, cls in hint.items():
-                auto_classifications[f"{wallet_id}_{i}_{item_idx}"] = cls
-    # Auto-fill missing USD values from CoinGecko
-    print(f"[CoinGecko] Scanning {len(transactions)} transactions for missing USD values...")
-    transactions = fill_missing_usd_values(transactions, state)
-    # Preserve manual transactions and their classifications across CSV re-uploads
-    old_txs = state.get('transactions', {}).get(wallet_id, [])
-    manual_txs = [tx for tx in old_txs if tx.get('manual')]
-    manual_old_indices = [i for i, tx in enumerate(old_txs) if tx.get('manual')]
-    # Collect classification keys for manual transactions (old index -> classifications)
-    manual_classifications = {}
-    for old_idx in manual_old_indices:
-        prefix = f"{wallet_id}_{old_idx}_"
-        for k, v in state.get('classifications', {}).items():
-            if k.startswith(prefix):
-                suffix = k[len(prefix):]
-                manual_classifications[(old_idx, suffix)] = v
-
-    state['transactions'][wallet_id] = transactions
-    # Clear old classifications for this wallet since new data
-    to_remove = [k for k in state.get('classifications', {}) if k.startswith(f"{wallet_id}_")]
-    for k in to_remove:
-        del state['classifications'][k]
-
-    # Apply auto-classifications discovered during parsing
-    for k, v in auto_classifications.items():
-        state['classifications'][k] = v
-
-    # Re-append manual transactions at the end and restore their classifications
-    if manual_txs:
-        base_idx = len(transactions)
-        for offset, mtx in enumerate(manual_txs):
-            state['transactions'][wallet_id].append(mtx)
-            new_idx = base_idx + offset
-            old_idx = manual_old_indices[offset]
-            for (oi, suffix), cls_val in manual_classifications.items():
-                if oi == old_idx:
-                    state['classifications'][f"{wallet_id}_{new_idx}_{suffix}"] = cls_val
+                state['classifications'][f"{wallet_id}_{src_i}_{item_idx}"] = cls
+        if manual_txs:
+            base_idx = len(new_txs)
+            for offset, mtx in enumerate(manual_txs):
+                state['transactions'][wallet_id].append(mtx)
+                new_idx = base_idx + offset
+                old_idx = manual_old_indices[offset]
+                for (oi, suffix), cls_val in manual_classifications.items():
+                    if oi == old_idx:
+                        state['classifications'][f"{wallet_id}_{new_idx}_{suffix}"] = cls_val
+        imported = len(new_txs)
+        skipped = 0
+    else:
+        existing = state['transactions'][wallet_id]
+        existing_keys = {_tx_identity_key(tx) for tx in existing}
+        base_idx = len(existing)
+        imported = 0
+        skipped = 0
+        for src_i, tx in enumerate(new_txs):
+            key = _tx_identity_key(tx)
+            if key in existing_keys:
+                skipped += 1
+                continue
+            existing_keys.add(key)
+            dest_idx = base_idx + imported
+            existing.append(tx)
+            hint = auto_cls_hints.get(src_i)
+            if hint:
+                state.setdefault('classifications', {})
+                for item_idx, cls in hint.items():
+                    state['classifications'][f"{wallet_id}_{dest_idx}_{item_idx}"] = cls
+            imported += 1
 
     save_state(state)
-    return redirect(url_for('wallet_detail', wallet_id=wallet_id))
+    return redirect(url_for('wallet_detail', wallet_id=wallet_id,
+                            imported=imported, skipped=skipped))
 
 @app.route('/wallets/<wallet_id>/add-transaction', methods=['POST'])
 def add_manual_transaction(wallet_id):
