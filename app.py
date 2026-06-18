@@ -10,7 +10,7 @@ import pdfrw
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response
 
-from storage import db
+from storage import db, repo_year, repo_shared
 from storage.compat import load_state_dict, save_state_dict
 
 _state_lock = threading.RLock()
@@ -1070,12 +1070,14 @@ def upload():
 
 @app.route('/positions')
 def positions():
-    state = load_state()
-    if not state or not state.get('positions'):
+    with db.connect(db.year_db_path(DEFAULT_TAX_YEAR)) as conn:
+        positions_list = repo_year.list_positions(conn)
+        filename = repo_year.get_meta(conn, 'filename', '')
+    if not positions_list:
         return redirect(url_for('index'))
-    stats = compute_stats(state['positions'])
-    return render_template('positions.html', positions=state['positions'], stats=stats,
-                           filename=state.get('filename', ''), active_nav='positions')
+    stats = compute_stats(positions_list)
+    return render_template('positions.html', positions=positions_list, stats=stats,
+                           filename=filename, active_nav='positions')
 
 @app.route('/reset', methods=['POST'])
 def reset():
@@ -1106,11 +1108,9 @@ def reupload_positions():
 @app.route('/api/positions')
 def api_positions():
     """JSON endpoint for positions (for client-side filtering)."""
-    state = load_state()
-    if not state:
-        return jsonify([])
+    with db.connect(db.year_db_path(DEFAULT_TAX_YEAR)) as conn:
+        positions = repo_year.list_positions(conn)
     symbol = request.args.get('symbol', '').strip()
-    positions = state.get('positions', [])
     if symbol:
         positions = [p for p in positions if p['symbol'].lower() == symbol.lower()]
     return jsonify(positions)
@@ -1587,12 +1587,17 @@ def build_parent_summary(tx, line_items):
 
 @app.route('/wallets/<wallet_id>')
 def wallet_detail(wallet_id):
-    state = ensure_state()
-    wallet = next((w for w in state['wallets'] if w['id'] == wallet_id), None)
-    if not wallet:
-        return redirect(url_for('wallets'))
-    transactions = state.get('transactions', {}).get(wallet_id, [])
-    classifications = state.get('classifications', {})
+    # Phase 3c: targeted repo reads instead of loading the whole 17k-tx dict.
+    with db.connect(db.year_db_path(DEFAULT_TAX_YEAR)) as conn:
+        wallet = repo_year.get_wallet(conn, wallet_id)
+        if not wallet:
+            return redirect(url_for('wallets'))
+        transactions = repo_year.list_transactions(conn, wallet_id)
+        classifications = repo_year.classifications_for_wallet(conn, wallet_id)
+        all_wallets = repo_year.list_wallets(conn)
+        known_address_groups = repo_year.get_meta(conn, 'known_addresses', [])
+    # Minimal state dict for the address helpers (they only read these keys).
+    state = {'wallets': all_wallets, 'known_addresses': known_address_groups}
     known_addresses = get_configured_addresses(state)
     addr_map = get_all_known_addresses(state)
 
