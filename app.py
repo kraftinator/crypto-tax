@@ -495,10 +495,14 @@ def parse_generic_csv(filepath):
             if tx_hash not in groups:
                 sender_norm = _normalize_hex(cleaned.get('sender', '')) or ''
                 recipient_norm = _normalize_hex(cleaned.get('recipient', '')) or ''
+                raw_type = cleaned.get('type', '').upper()
+                # BURN with proceeds (e.g., LP exit, Polymarket position close) is
+                # functionally a TRADE — mirrors Chain Glance parser behavior.
+                stored_type = 'TRADE' if raw_type == 'BURN' else raw_type
                 groups[tx_hash] = {
                     'tx_hash': tx_hash,
                     'date': cleaned.get('date', ''),
-                    'type': cleaned.get('type', '').upper(),
+                    'type': stored_type,
                     'sender': sender_norm,
                     'recipient': recipient_norm,
                     'blockchain': cleaned.get('blockchain', ''),
@@ -1664,7 +1668,7 @@ def build_line_items(tx):
     line_items = []
 
     for item in details.get('sent', []):
-        usd_val = item.get('pretty_usd', '') or item.get('usd_value', '')
+        usd_val = item.get('usd_value', '') or item.get('pretty_usd', '')
         if isinstance(usd_val, str):
             usd_val = usd_val.replace('$', '').replace(',', '').strip()
         try:
@@ -1683,7 +1687,7 @@ def build_line_items(tx):
         })
 
     for item in details.get('received', []):
-        usd_val = item.get('pretty_usd', '') or item.get('usd_value', '')
+        usd_val = item.get('usd_value', '') or item.get('pretty_usd', '')
         if isinstance(usd_val, str):
             usd_val = usd_val.replace('$', '').replace(',', '').strip()
         try:
@@ -1702,7 +1706,7 @@ def build_line_items(tx):
         })
 
     for item in details.get('fees', []):
-        usd_val = item.get('pretty_usd', '') or item.get('usd_value', '')
+        usd_val = item.get('usd_value', '') or item.get('pretty_usd', '')
         if isinstance(usd_val, str):
             usd_val = usd_val.replace('$', '').replace(',', '').strip()
         try:
