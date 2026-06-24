@@ -2307,6 +2307,15 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
     # preserving original cost basis and acquisition date across the lock period.
     staked_pools = {}  # wallet_addr -> [staked lots]
 
+    # Bridge-pending events: one entry per Bridge SEND, holding the consumed lots
+    # until the matching Bridge RECEIVE arrives. Each event:
+    #   {'sent_at': iso_date, 'symbol': str, 'sent_amount': float, 'lots': [consumed]}
+    # On RECEIVE, the earliest pending event for the same symbol is consumed FIFO.
+    # The volume ratio (received / sent) scales each lot's volume down and its
+    # price up so total basis is preserved across the bridge — fee is absorbed
+    # into the remaining basis rather than recognized as a separate disposal.
+    bridge_pending = {}  # wallet_addr -> [bridge_events]
+
     # Collect ALL events across ALL wallets
     lot_counter = [0]  # mutable counter for unique lot IDs
 
@@ -2530,6 +2539,65 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             'total': total_usd,
                             'source': '2025_unstaking',
                         })
+                elif cls == 'Bridge':
+                    # Bridge RECEIVE: pair with the oldest pending Bridge SEND for
+                    # this symbol. Restore the consumed lots to the main pool,
+                    # scaling each lot's volume by (received / sent) and inflating
+                    # its price so total basis is preserved. The bridge fee
+                    # (sent - received) is absorbed into the remaining basis.
+                    pending = bridge_pending.get(wallet_addr, [])
+                    match_idx = next(
+                        (i for i, e in enumerate(pending)
+                         if e['symbol'] == token.upper()),
+                        None,
+                    )
+                    if match_idx is None:
+                        # No matching SEND yet — bridge arrived out of order or
+                        # the source wallet hasn't been imported. Skip; nothing
+                        # added to pool. (Could be flagged in UI later.)
+                        continue
+                    event = pending.pop(match_idx)
+                    sent_amount = event['sent_amount']
+                    if sent_amount <= 0:
+                        continue
+                    dest_pool = pools.setdefault(wallet_addr, [])
+                    if amount > sent_amount:
+                        # Received more than sent (rebate). Restore lots as-is
+                        # and add a zero-basis lot for the excess.
+                        for lot in event['lots']:
+                            dest_pool.append({
+                                'lot_id': lot['lot_id'],
+                                'date': lot['date'],
+                                'symbol': token.upper(),
+                                'volume': lot['volume_used'],
+                                'price': lot['price'],
+                                'total': lot['volume_used'] * lot['price'],
+                                'source': lot['source'],
+                            })
+                        excess = amount - sent_amount
+                        dest_pool.append({
+                            'lot_id': next_lot_id('bridge_rebate'),
+                            'date': tx_date,
+                            'symbol': token.upper(),
+                            'volume': excess,
+                            'price': 0,
+                            'total': 0,
+                            'source': 'bridge_rebate',
+                        })
+                    else:
+                        scale = amount / sent_amount
+                        for lot in event['lots']:
+                            new_volume = lot['volume_used'] * scale
+                            new_price = lot['price'] / scale if scale > 0 else 0
+                            dest_pool.append({
+                                'lot_id': lot['lot_id'],
+                                'date': lot['date'],
+                                'symbol': token.upper(),
+                                'volume': new_volume,
+                                'price': new_price,
+                                'total': new_volume * new_price,
+                                'source': lot['source'],
+                            })
 
         elif tx_type == 'SEND':
             recipient = tx.get('recipient', '').lower()
@@ -2566,6 +2634,19 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             'price': cl['price'],
                             'total': cl['volume_used'] * cl['price'],
                             'source': cl['source'],
+                        })
+                elif cls == 'Bridge':
+                    # Bridge SEND: consume lots from main pool, store as a pending
+                    # bridge event keyed by symbol. The matching Bridge RECEIVE on
+                    # the destination chain will restore them with basis preserved.
+                    source_pool = pools.get(wallet_addr, [])
+                    consumed = _consume_from_pool(source_pool, token, amount, method)
+                    if consumed:
+                        bridge_pending.setdefault(wallet_addr, []).append({
+                            'sent_at': tx_date,
+                            'symbol': token.upper(),
+                            'sent_amount': amount,
+                            'lots': consumed,
                         })
 
         elif tx_type == 'TRADE':
