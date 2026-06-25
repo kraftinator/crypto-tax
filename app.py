@@ -2206,19 +2206,22 @@ def _parse_amount(item):
 def _lot_matches_token(lot, symbol_upper, contract_address):
     """True if a pool lot is for the same token as the (symbol, contract) pair.
 
-    When both the lot and the target carry a non-empty contract_address, both
-    symbol AND contract must match — this is what lets two different ERC20s with
-    the same ticker stay in separate pools. When either side lacks a contract
-    (native ETH, legacy opening positions, source data without contract), fall
-    back to symbol-only matching so we don't lose lots that pre-date this field.
+    When both sides carry a non-empty contract_address, the contract is
+    authoritative — same contract IS the same token regardless of how the
+    symbol was labeled in either CSV (e.g., a lot acquired as
+    "steakUSDCfarcaster" sold under the placeholder "ERC20 ***" still matches
+    by contract). This also keeps two different ERC20s that share a ticker in
+    separate pools.
+
+    When either side lacks a contract (native ETH, legacy opening positions,
+    source data without contract info), fall back to symbol-only matching so we
+    don't lose lots that pre-date this field.
     """
-    if lot['symbol'].upper() != symbol_upper:
-        return False
     lot_contract = (lot.get('contract_address') or '').lower()
     target_contract = (contract_address or '').lower()
     if lot_contract and target_contract:
         return lot_contract == target_contract
-    return True
+    return lot['symbol'].upper() == symbol_upper
 
 
 def _consume_from_pool(pool_lots, symbol, amount, method, contract_address=None):
