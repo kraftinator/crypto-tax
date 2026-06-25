@@ -2203,15 +2203,37 @@ def _parse_amount(item):
         return 0
 
 
-def _consume_from_pool(pool_lots, symbol, amount, method):
+def _lot_matches_token(lot, symbol_upper, contract_address):
+    """True if a pool lot is for the same token as the (symbol, contract) pair.
+
+    When both the lot and the target carry a non-empty contract_address, both
+    symbol AND contract must match — this is what lets two different ERC20s with
+    the same ticker stay in separate pools. When either side lacks a contract
+    (native ETH, legacy opening positions, source data without contract), fall
+    back to symbol-only matching so we don't lose lots that pre-date this field.
+    """
+    if lot['symbol'].upper() != symbol_upper:
+        return False
+    lot_contract = (lot.get('contract_address') or '').lower()
+    target_contract = (contract_address or '').lower()
+    if lot_contract and target_contract:
+        return lot_contract == target_contract
+    return True
+
+
+def _consume_from_pool(pool_lots, symbol, amount, method, contract_address=None):
     """Consume lots from a pool for a given symbol using LIFO/FIFO.
+
+    When `contract_address` is provided and the candidate lots have their own
+    contract recorded, both must match. Otherwise matching falls back to symbol
+    only (see `_lot_matches_token`).
 
     Mutates pool_lots in-place (reduces volumes, removes exhausted lots).
     Returns list of consumed lot dicts: [{lot_id, date, volume_used, price, cost_basis, source}]
     """
     symbol_upper = symbol.upper()
-    # Gather matching lots with their indices
-    matching = [(i, lot) for i, lot in enumerate(pool_lots) if lot['symbol'].upper() == symbol_upper]
+    matching = [(i, lot) for i, lot in enumerate(pool_lots)
+                if _lot_matches_token(lot, symbol_upper, contract_address)]
     # Sort by date: LIFO = newest first, FIFO = oldest first
     matching.sort(key=lambda x: x[1]['date'], reverse=(method == 'LIFO'))
 
@@ -2232,6 +2254,7 @@ def _consume_from_pool(pool_lots, symbol, amount, method):
             'price': lot['price'],
             'cost_basis': cost_basis,
             'source': lot['source'],
+            'contract_address': (lot.get('contract_address') or '').lower(),
         })
         remaining -= vol_to_use
         lot['volume'] -= vol_to_use
@@ -2300,6 +2323,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
             'price': effective_price,
             'total': total,
             'source': 'opening',
+            'contract_address': (p.get('contract_address') or '').lower(),
         })
 
     # Staked-lots pools: separate sub-pool per wallet for tokens locked via Staking.
@@ -2419,6 +2443,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     'price': price_per,
                     'total': total_usd,
                     'source': src_tag,
+                    'contract_address': (item.get('contract_address') or '').lower(),
                 })
             continue
 
@@ -2447,6 +2472,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         'price': price_per,
                         'total': total_usd,
                         'source': 'self_receive',
+                        'contract_address': (item.get('contract_address') or '').lower(),
                     })
                 continue
             is_from_own_wallet = sender in own_addresses
@@ -2471,13 +2497,14 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         # From known address (e.g., Coinbase) — use label as pool key
                         source_addr = known_label
                     source_pool = pools.get(source_addr, [])
+                    item_contract = (item.get('contract_address') or '').lower()
                     # Fallback: if the label-keyed pool has nothing for this token but
                     # the sender's hex address itself has a pool (opening positions whose
                     # account field used the hex address), use that.
                     if not any(l.get('symbol','').upper() == token.upper() for l in source_pool):
                         if sender in pools and any(l.get('symbol','').upper() == token.upper() for l in pools[sender]):
                             source_pool = pools[sender]
-                    consumed_lots = _consume_from_pool(source_pool, token, amount, method)
+                    consumed_lots = _consume_from_pool(source_pool, token, amount, method, contract_address=item_contract)
                     # Add consumed lots to destination pool (carrying original cost basis)
                     dest_pool = pools.setdefault(wallet_addr, [])
                     for cl in consumed_lots:
@@ -2489,6 +2516,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             'price': cl['price'],
                             'total': cl['volume_used'] * cl['price'],
                             'source': cl['source'],
+                            'contract_address': cl.get('contract_address') or item_contract,
                         })
                     # If there's unmatched volume (no lots in source), don't create fallback lots
                     # The trade will stay unmatched until the source wallet is uploaded
@@ -2505,13 +2533,15 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         'price': price_per,
                         'total': total_usd,
                         'source': source,
+                        'contract_address': (item.get('contract_address') or '').lower(),
                     })
                 elif cls == 'Staking':
                     # Staking RECEIVE (unstaking): pull original lots from staked sub-pool
                     # back to the main pool, preserving cost basis and acquisition date.
                     # Any excess (staking rewards) gets a new lot at FMV.
+                    item_contract = (item.get('contract_address') or '').lower()
                     staked = staked_pools.get(wallet_addr, [])
-                    consumed = _consume_from_pool(staked, token, amount, method)
+                    consumed = _consume_from_pool(staked, token, amount, method, contract_address=item_contract)
                     recovered = 0.0
                     dest_pool = pools.setdefault(wallet_addr, [])
                     for cl in consumed:
@@ -2523,6 +2553,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             'price': cl['price'],
                             'total': cl['volume_used'] * cl['price'],
                             'source': cl['source'],
+                            'contract_address': cl.get('contract_address') or item_contract,
                         })
                         recovered += cl['volume_used']
                     excess = amount - recovered
@@ -2538,6 +2569,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             'price': price_per,
                             'total': total_usd,
                             'source': '2025_unstaking',
+                            'contract_address': item_contract,
                         })
                 elif cls == 'Bridge':
                     # Bridge RECEIVE: pair with the oldest pending Bridge SEND for
@@ -2545,6 +2577,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                     # scaling each lot's volume by (received / sent) and inflating
                     # its price so total basis is preserved. The bridge fee
                     # (sent - received) is absorbed into the remaining basis.
+                    item_contract = (item.get('contract_address') or '').lower()
                     pending = bridge_pending.get(wallet_addr, [])
                     match_idx = next(
                         (i for i, e in enumerate(pending)
@@ -2573,6 +2606,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                                 'price': lot['price'],
                                 'total': lot['volume_used'] * lot['price'],
                                 'source': lot['source'],
+                                'contract_address': lot.get('contract_address') or item_contract,
                             })
                         excess = amount - sent_amount
                         dest_pool.append({
@@ -2583,6 +2617,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             'price': 0,
                             'total': 0,
                             'source': 'bridge_rebate',
+                            'contract_address': item_contract,
                         })
                     else:
                         scale = amount / sent_amount
@@ -2597,6 +2632,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                                 'price': new_price,
                                 'total': new_volume * new_price,
                                 'source': lot['source'],
+                                'contract_address': lot.get('contract_address') or item_contract,
                             })
 
         elif tx_type == 'SEND':
@@ -2622,8 +2658,9 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                 elif cls == 'Staking':
                     # Staking SEND: move lots from main pool to staked sub-pool, preserving
                     # original basis and date so unstaking can restore them later.
+                    item_contract = (item.get('contract_address') or '').lower()
                     source_pool = pools.get(wallet_addr, [])
-                    consumed = _consume_from_pool(source_pool, token, amount, method)
+                    consumed = _consume_from_pool(source_pool, token, amount, method, contract_address=item_contract)
                     staked_dest = staked_pools.setdefault(wallet_addr, [])
                     for cl in consumed:
                         staked_dest.append({
@@ -2634,13 +2671,15 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                             'price': cl['price'],
                             'total': cl['volume_used'] * cl['price'],
                             'source': cl['source'],
+                            'contract_address': cl.get('contract_address') or item_contract,
                         })
                 elif cls == 'Bridge':
                     # Bridge SEND: consume lots from main pool, store as a pending
                     # bridge event keyed by symbol. The matching Bridge RECEIVE on
                     # the destination chain will restore them with basis preserved.
+                    item_contract = (item.get('contract_address') or '').lower()
                     source_pool = pools.get(wallet_addr, [])
-                    consumed = _consume_from_pool(source_pool, token, amount, method)
+                    consumed = _consume_from_pool(source_pool, token, amount, method, contract_address=item_contract)
                     if consumed:
                         bridge_pending.setdefault(wallet_addr, []).append({
                             'sent_at': tx_date,
@@ -2667,11 +2706,13 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
             if is_migration:
                 if sent and received:
                     sent_token = sent[0].get('token', '')
+                    sent_contract = (sent[0].get('contract_address') or '').lower()
                     sent_amount = _parse_amount(sent[0])
                     recv_token = received[0].get('token', '')
+                    recv_contract = (received[0].get('contract_address') or '').lower()
                     if sent_token and recv_token and sent_amount > 0:
                         wallet_pool = pools.setdefault(wallet_addr, [])
-                        consumed = _consume_from_pool(wallet_pool, sent_token, sent_amount, method)
+                        consumed = _consume_from_pool(wallet_pool, sent_token, sent_amount, method, contract_address=sent_contract)
                         for cl in consumed:
                             wallet_pool.append({
                                 'lot_id': cl['lot_id'],
@@ -2681,6 +2722,7 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                                 'price': cl['price'],
                                 'total': cl['volume_used'] * cl['price'],
                                 'source': cl['source'],
+                                'contract_address': recv_contract,
                             })
                 continue
 
@@ -2694,8 +2736,9 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         continue
                     if token.upper() == 'USD':
                         continue  # fiat is special-cased; not lot-tracked
+                    item_contract = (item.get('contract_address') or '').lower()
                     source_pool = pools.get(wallet_addr, [])
-                    _consume_from_pool(source_pool, token, amount, method)
+                    _consume_from_pool(source_pool, token, amount, method, contract_address=item_contract)
 
         elif tx_type == 'MINT':
             sent = details.get('sent', [])
@@ -2726,13 +2769,14 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         amount = _parse_amount(item)
                         if amount <= 0 or not token:
                             continue
+                        item_contract = (item.get('contract_address') or '').lower()
                         source_pool = pools.get(wallet_addr, [])
-                        _consume_from_pool(source_pool, token, amount, method)
+                        _consume_from_pool(source_pool, token, amount, method, contract_address=item_contract)
 
     return pools
 
 
-def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', consume=False, as_of_date=None):
+def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', consume=False, as_of_date=None, contract_address=None):
     """Match lots from a pre-built virtual pool for a sold token using LIFO or FIFO.
 
     pool_lots: list of lot dicts from the wallet's virtual pool
@@ -2740,6 +2784,9 @@ def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', cons
     as_of_date: if provided, only consider lots whose acquisition date <= as_of_date
         (prevents future lots from satisfying past trades when the pool is built
         with all-time data).
+    contract_address: when provided, lots with their own contract_address must match
+        exactly (in addition to symbol). Native ETH and legacy lots that lack a
+        contract still match on symbol alone — see `_lot_matches_token`.
     Returns (matched_lots, remaining_amount, warning).
     matched_lots: [{'lot_index': str, 'volume_used': float, 'cost_basis': float,
                      'date_acquired': str, 'price': float, 'source': str}]
@@ -2747,7 +2794,7 @@ def lifo_match_from_pool(pool_lots, sold_token, sold_amount, method='LIFO', cons
     symbol_upper = sold_token.upper()
     # Gather matching lots with their pool indices
     matching = [(i, lot) for i, lot in enumerate(pool_lots)
-                if lot['symbol'].upper() == symbol_upper
+                if _lot_matches_token(lot, symbol_upper, contract_address)
                 and (as_of_date is None or lot['date'] <= as_of_date)]
     # Sort by date: LIFO = newest first, FIFO = oldest first
     matching.sort(key=lambda x: x[1]['date'], reverse=(method == 'LIFO'))
@@ -3079,6 +3126,7 @@ def _build_pool_for_trade(state, method, target_wallet_id, target_tx_index):
 
             if tx_type == 'TRADE':
                 sold_token = sent[0].get('token', '') if sent else ''
+                sold_contract = (sent[0].get('contract_address') or '').lower() if sent else ''
                 try:
                     sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token) if sent else 0
                 except (ValueError, TypeError):
@@ -3089,6 +3137,7 @@ def _build_pool_for_trade(state, method, target_wallet_id, target_tx_index):
                 if not has_payment:
                     continue
                 sold_token = sent[0].get('token', '') if sent else ''
+                sold_contract = (sent[0].get('contract_address') or '').lower() if sent else ''
                 try:
                     total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
                     total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
@@ -3108,6 +3157,7 @@ def _build_pool_for_trade(state, method, target_wallet_id, target_tx_index):
                 'date': tx.get('date', ''),
                 'sold_token': sold_token,
                 'sold_amount': sold_amount,
+                'sold_contract': sold_contract,
             })
 
     all_trades.sort(key=lambda x: x['date'])
@@ -3122,7 +3172,7 @@ def _build_pool_for_trade(state, method, target_wallet_id, target_tx_index):
             continue
         wallet_addr = trade['wallet']['address'].lower()
         wallet_pool = recon_pools.get(wallet_addr, [])
-        _consume_from_pool(wallet_pool, trade['sold_token'], trade['sold_amount'], method)
+        _consume_from_pool(wallet_pool, trade['sold_token'], trade['sold_amount'], method, contract_address=trade.get('sold_contract'))
 
     target_wallet = next((w for w in state['wallets'] if w['id'] == target_wallet_id), None)
     if not target_wallet:
@@ -3157,6 +3207,7 @@ def reconcile_detail(wallet_id, tx_index):
     tx_type = tx.get('type', '').upper()
     if tx_type == 'MINT':
         sold_token = sent[0].get('token', '') if sent else ''
+        sold_contract = (sent[0].get('contract_address') or '').lower() if sent else ''
         try:
             total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
             total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
@@ -3178,6 +3229,7 @@ def reconcile_detail(wallet_id, tx_index):
         proceeds = sent_usd - refund_usd
     else:
         sold_token = sent[0].get('token', '') if sent else ''
+        sold_contract = (sent[0].get('contract_address') or '').lower() if sent else ''
         try:
             sold_amount = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token) if sent else 0
         except (ValueError, TypeError):
@@ -3219,7 +3271,7 @@ def reconcile_detail(wallet_id, tx_index):
     token_2025_lots = [l for l in all_2025_lots if l['symbol'].upper() == sold_token.upper()]
 
     # Match from virtual pool
-    matched_lots, remaining, warning = lifo_match_from_pool(wallet_pool, sold_token, sold_amount, method=method)
+    matched_lots, remaining, warning = lifo_match_from_pool(wallet_pool, sold_token, sold_amount, method=method, contract_address=sold_contract)
     matched_indices = {m['lot_index'] for m in matched_lots}
 
     # Calculate cost basis and gain/loss from LIFO match
@@ -3313,6 +3365,7 @@ def reconcile_confirm():
 
     if tx_type == 'MINT':
         sold_token = sent[0].get('token', '') if sent else ''
+        sold_contract = (sent[0].get('contract_address') or '').lower() if sent else ''
         try:
             total_sent = sum(abs(float(s.get('amount', 0))) for s in sent if s.get('token') == sold_token)
             total_refund = sum(abs(float(r.get('amount', 0))) for r in received if r.get('token') == sold_token)
@@ -3329,6 +3382,7 @@ def reconcile_confirm():
         proceeds = sent_usd - refund_usd
     else:
         sold_token = sent[0].get('token', '') if sent else ''
+        sold_contract = (sent[0].get('contract_address') or '').lower() if sent else ''
         sold_amount_raw = sent[0].get('amount', 0) if sent else 0
         try:
             sold_amount = abs(float(sold_amount_raw))
@@ -3343,7 +3397,7 @@ def reconcile_confirm():
     # Build virtual lot pool with prior trades consumed, then match
     method = state.get('cost_basis_method', 'LIFO')
     wallet_pool = _build_pool_for_trade(state, method, wallet_id, tx_index)
-    matched_lots, remaining, warning = lifo_match_from_pool(wallet_pool, sold_token, sold_amount, method=method)
+    matched_lots, remaining, warning = lifo_match_from_pool(wallet_pool, sold_token, sold_amount, method=method, contract_address=sold_contract)
 
     total_cost_basis = sum(m['cost_basis'] for m in matched_lots)
     gain_loss = proceeds - total_cost_basis
@@ -3800,6 +3854,7 @@ def _run_reconcile_all(state):
         if not sent:
             return
         sold_token = sent[0].get('token', '')
+        sold_contract = (sent[0].get('contract_address') or '').lower()
         # Skip Buys (USD on sent side) and Migrations (non-taxable rebrand)
         if sold_token.upper() == 'USD':
             return
@@ -3813,7 +3868,7 @@ def _run_reconcile_all(state):
             return
         proceeds = get_trade_proceeds(tx)
         matched_lots, remaining, _ = lifo_match_from_pool(
-            wallet_pool, sold_token, sold_amount, method=m, consume=False)
+            wallet_pool, sold_token, sold_amount, method=m, consume=False, contract_address=sold_contract)
         dust_tol = max(1e-9, sold_amount * 0.0000001)
         if matched_lots and remaining < dust_tol:
             total_cost_basis = sum(mm['cost_basis'] for mm in matched_lots)
