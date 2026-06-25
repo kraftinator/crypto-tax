@@ -70,6 +70,7 @@ def rollover(from_year, to_year, force=False):
                 'fee':         '0',
                 'fee_currency':'USD',
                 'memo':        f"rollover_from_{from_year} ({lot.get('source', '')})",
+                'contract_address': (lot.get('contract_address') or '').lower(),
             })
 
     print(f"  source lots in pools: {sum(len(v) for v in pools.values())}")
