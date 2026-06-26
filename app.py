@@ -2271,7 +2271,7 @@ def _consume_from_pool(pool_lots, symbol, amount, method, contract_address=None)
     return consumed
 
 
-def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumption=False, trade_callback=None):
+def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumption=False, trade_callback=None, return_sub_pools=False):
     """Build virtual lot pools for all wallets by processing events chronologically.
 
     Returns: {wallet_address_lower: [lot_dicts]}
@@ -2279,6 +2279,10 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
 
     skip_trade_consumption: if True, don't consume the sold side of TRADE/MINT transactions.
         The received side is still added. Use this when _run_reconcile_all will do the consuming.
+
+    return_sub_pools: if True, return a tuple (pools, staked_pools, bridge_pending) so
+        callers like the year-rollover script can also carry forward staked / in-flight
+        lots. Default False to preserve the existing single-dict return shape.
 
     The pool is computed fresh each time (idempotent). Opening positions are never modified.
     """
@@ -2776,6 +2780,8 @@ def build_wallet_lot_pools(state, method, up_to_date=None, skip_trade_consumptio
                         source_pool = pools.get(wallet_addr, [])
                         _consume_from_pool(source_pool, token, amount, method, contract_address=item_contract)
 
+    if return_sub_pools:
+        return pools, staked_pools, bridge_pending
     return pools
 
 

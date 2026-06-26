@@ -47,7 +47,29 @@ def rollover(from_year, to_year, force=False):
 
     # Replay the reconcile pool build. With default args, this consumes
     # every TRADE / MINT-payment sell, leaving the unsold lots per wallet.
-    pools = build_wallet_lot_pools(src, method)
+    # return_sub_pools=True also gives us the staked sub-pool and in-flight
+    # bridge events so their lots can carry forward — without this, lots
+    # locked at year-end vanish from the next year's pool.
+    pools, staked_pools, bridge_pending = build_wallet_lot_pools(
+        src, method, return_sub_pools=True
+    )
+
+    def make_position(lot, wallet_addr, source_label):
+        volume = lot.get('volume', 0)
+        price = lot.get('price', 0)
+        return {
+            'symbol':      lot.get('symbol', ''),
+            'date':        lot.get('date', ''),
+            'volume':      str(volume),
+            'price':       str(price),
+            'total':       str(volume * price),
+            'account':     wallet_addr,
+            'currency':    'USD',
+            'fee':         '0',
+            'fee_currency':'USD',
+            'memo':        f"rollover_from_{from_year} ({source_label})",
+            'contract_address': (lot.get('contract_address') or '').lower(),
+        }
 
     # Turn the leftover lots into opening positions for the next year.
     leftover_positions = []
@@ -58,24 +80,51 @@ def rollover(from_year, to_year, force=False):
             if volume <= EPS:
                 skipped += 1
                 continue
-            price = lot.get('price', 0)
-            leftover_positions.append({
-                'symbol':      lot.get('symbol', ''),
-                'date':        lot.get('date', ''),
-                'volume':      str(volume),
-                'price':       str(price),
-                'total':       str(volume * price),
-                'account':     wallet_addr,
-                'currency':    'USD',
-                'fee':         '0',
-                'fee_currency':'USD',
-                'memo':        f"rollover_from_{from_year} ({lot.get('source', '')})",
-                'contract_address': (lot.get('contract_address') or '').lower(),
-            })
+            leftover_positions.append(make_position(lot, wallet_addr, lot.get('source', '')))
 
-    print(f"  source lots in pools: {sum(len(v) for v in pools.values())}")
-    print(f"  empty/dust skipped:   {skipped}")
-    print(f"  rollover positions:   {len(leftover_positions)}")
+    # Carry staked sub-pool lots forward. Without this they'd vanish at
+    # year-end and the next year's unstake event would have no basis to pull
+    # from. The lot tag includes "staked" so the audit trail is preserved.
+    staked_carried = 0
+    for wallet_addr, lots in staked_pools.items():
+        for lot in lots:
+            volume = lot.get('volume', 0)
+            if volume <= EPS:
+                skipped += 1
+                continue
+            label = f"{lot.get('source', '')} | staked".strip(' |')
+            leftover_positions.append(make_position(lot, wallet_addr, label))
+            staked_carried += 1
+
+    # Carry in-flight bridge lots forward too — same vanishing risk if a
+    # bridge crosses the year boundary before its RECEIVE leg arrives.
+    bridge_carried = 0
+    for wallet_addr, events in bridge_pending.items():
+        for event in events:
+            for lot in event.get('lots', []):
+                volume = lot.get('volume_used', 0)
+                if volume <= EPS:
+                    skipped += 1
+                    continue
+                synth = {
+                    'symbol': event.get('symbol', ''),
+                    'date': lot.get('date', ''),
+                    'volume': volume,
+                    'price': lot.get('price', 0),
+                    'contract_address': lot.get('contract_address', ''),
+                    'source': lot.get('source', ''),
+                }
+                label = f"{lot.get('source', '')} | bridge in flight (sent {event.get('sent_at', '')[:10]})".strip(' |')
+                leftover_positions.append(make_position(synth, wallet_addr, label))
+                bridge_carried += 1
+
+    print(f"  source lots in main pools:   {sum(len(v) for v in pools.values())}")
+    print(f"  source lots in staked pools: {sum(len(v) for v in staked_pools.values())}")
+    print(f"  source lots in bridge flight:{sum(len(e.get('lots', [])) for v in bridge_pending.values() for e in v)}")
+    print(f"  staked carried forward:      {staked_carried}")
+    print(f"  bridge in-flight carried:    {bridge_carried}")
+    print(f"  empty/dust skipped:          {skipped}")
+    print(f"  rollover positions:          {len(leftover_positions)}")
 
     # Bootstrap and load the target year's DB (will be empty if first run).
     db.bootstrap_year_db(to_year)
