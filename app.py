@@ -791,7 +791,7 @@ def compute_stats(positions):
     }
 
 # Stablecoins — always $1.00
-STABLECOINS = {'USDC', 'USDT', 'DAI', 'LUSD', 'BUSD', 'GUSD', 'USDP', 'TUSD', 'FRAX'}
+STABLECOINS = {'USDC', 'USDC.E', 'USDT', 'DAI', 'LUSD', 'BUSD', 'GUSD', 'USDP', 'TUSD', 'FRAX', 'PUSD'}
 
 # ============ COINGECKO PRICE LOOKUP ============
 
@@ -2213,15 +2213,24 @@ def _lot_matches_token(lot, symbol_upper, contract_address):
     by contract). This also keeps two different ERC20s that share a ticker in
     separate pools.
 
+    USD-pegged stablecoins are a deliberate exception: any token whose symbol
+    is in `STABLECOINS` matches any other stablecoin in the set, regardless of
+    contract. Economically they're all $1/token, so disposing of USDC.e against
+    a USDC lot (or pUSD against USDT, etc.) is a non-event and there's no point
+    forcing a separate pool per chain variant.
+
     When either side lacks a contract (native ETH, legacy opening positions,
     source data without contract info), fall back to symbol-only matching so we
     don't lose lots that pre-date this field.
     """
+    lot_symbol = lot['symbol'].upper()
+    if lot_symbol in STABLECOINS and symbol_upper in STABLECOINS:
+        return True
     lot_contract = (lot.get('contract_address') or '').lower()
     target_contract = (contract_address or '').lower()
     if lot_contract and target_contract:
         return lot_contract == target_contract
-    return lot['symbol'].upper() == symbol_upper
+    return lot_symbol == symbol_upper
 
 
 def _consume_from_pool(pool_lots, symbol, amount, method, contract_address=None):
